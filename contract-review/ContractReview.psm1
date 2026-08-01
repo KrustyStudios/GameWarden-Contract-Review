@@ -1,12 +1,12 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'ContractReview.Runtime.ps1')
+. (Join-Path $PSScriptRoot 'ContractReview.Core.ps1')
 . (Join-Path $PSScriptRoot 'ContractReview.Validation.ps1')
 
 $script:GovernancePaths = @('AI_RULES.md','AI_GUARDRAILS.md','contracts/APP_CONTRACT.md','.design/contract-epic.md')
 $script:RunnerPaths = @(
     'Start-ContractReview.ps1','Recover-InterruptedContractReview.ps1','contract-review/ContractRecovery.psm1','contract-review/ContractApply.psm1',
-    'contract-review/ContractReview.psm1','contract-review/ContractReview.Runtime.ps1','contract-review/ContractReview.Validation.ps1',
+    'contract-review/ContractReview.psm1','contract-review/ContractReview.Core.ps1','contract-review/ContractReview.Validation.ps1',
     'contract-review/Invoke-ClaudeReview.ps1','contract-review/Invoke-CodexReview.ps1',
     'schemas/agent-response.schema.json','schemas/contract-review-request.schema.json',
     'schemas/contract-review-execution.schema.json','schemas/contract-apply-decision.schema.json'
@@ -50,13 +50,13 @@ function Get-ContractReviewExecutionManifest {
     if ((Resolve-Path -LiteralPath $ClaudeAdapter).Path -ne $defaultClaude) { $runnerFiles['configured-claude-adapter'] = Get-ContractReviewSha256 -Path $ClaudeAdapter }
     if ((Resolve-Path -LiteralPath $CodexAdapter).Path -ne $defaultCodex) { $runnerFiles['configured-codex-adapter'] = Get-ContractReviewSha256 -Path $CodexAdapter }
     $codexCommand = Resolve-ContractReviewProviderCommand -Provider codex
-    $codexProvider = [ordered]@{ provider='codex'; model=$CodexModel; reasoningEffort=$CodexReasoningEffort; commandPath=$codexCommand.path; commandSha256=$codexCommand.sha256 }
+    $codexProvider = [ordered]@{ provider='codex'; model=$CodexModel; reasoningEffort=$CodexReasoningEffort; commandPath=$codexCommand.path; commandSha256=$codexCommand.sha256; commandVersion=$codexCommand.version }
     $claudeProvider = if ($AllCodex) { $null } else {
         $claudeCommand = Resolve-ContractReviewProviderCommand -Provider claude
-        [ordered]@{ provider='claude'; model=$ClaudeModel; reasoningEffort=$null; commandPath=$claudeCommand.path; commandSha256=$claudeCommand.sha256 }
+        [ordered]@{ provider='claude'; model=$ClaudeModel; reasoningEffort=$null; commandPath=$claudeCommand.path; commandSha256=$claudeCommand.sha256; commandVersion=$claudeCommand.version }
     }
     return [ordered]@{
-        protocolVersion = 2; requestId = [string]$request.requestId; requestSha256 = Get-ContractReviewSha256 -Path $RequestPath
+        protocolVersion = 3; requestId = [string]$request.requestId; requestSha256 = Get-ContractReviewSha256 -Path $RequestPath
         targetRepository = $target.Path; targetRevision = $target.Revision; pinnedObjects = $pinned; runnerFiles = $runnerFiles
         reviewMode = if ($AllCodex) { 'all-codex' } else { 'claude-codex' }
         providers = [ordered]@{

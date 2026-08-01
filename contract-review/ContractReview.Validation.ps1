@@ -18,6 +18,30 @@ function Get-ContractReviewEvidenceRequirement {
     return 'Copy one contiguous passage from the cited immutable input. Whitespace-only differences caused by line wrapping are allowed; every non-whitespace character and its order must match. Do not paraphrase, reorder text, join separate passages, or use an ellipsis to omit text.'
 }
 
+function Get-ContractReviewUniquenessRequirement {
+    return 'Every response array declared unique by the canonical response contract must contain no duplicate values. Uniqueness is mechanically checked after every response.'
+}
+
+function ConvertTo-ContractReviewProviderSchema {
+    param([AllowNull()][object]$Node)
+    if ($null -eq $Node -or $Node -is [string] -or $Node -is [ValueType]) { return }
+    if ($Node -is [Collections.IEnumerable] -and $Node -isnot [pscustomobject]) {
+        foreach ($item in $Node) { ConvertTo-ContractReviewProviderSchema -Node $item }
+        return
+    }
+    $properties = @($Node.PSObject.Properties)
+    if ($properties.Name -contains 'uniqueItems') {
+        if ($Node.uniqueItems -ne $true) { throw 'Canonical response schema contains an unsupported non-true uniqueItems value.' }
+        $Node.PSObject.Properties.Remove('uniqueItems')
+        $description = Get-ContractReviewUniquenessRequirement
+        if ($Node.PSObject.Properties.Name -contains 'description' -and -not [string]::IsNullOrWhiteSpace([string]$Node.description)) {
+            $description = "$($Node.description) $description"
+        }
+        $Node | Add-Member -NotePropertyName description -NotePropertyValue $description -Force
+    }
+    foreach ($property in @($Node.PSObject.Properties)) { ConvertTo-ContractReviewProviderSchema -Node $property.Value }
+}
+
 function New-ContractReviewRoleSchema {
     param(
         [Parameter(Mandatory = $true)][string]$BaseSchemaPath,
@@ -37,6 +61,7 @@ function New-ContractReviewRoleSchema {
             $property.PSObject.Properties.Remove('maxItems')
         }
     }
+    ConvertTo-ContractReviewProviderSchema -Node $schema
     Write-ContractReviewAtomicJson -Path $Path -Value $schema
     return $Path
 }
@@ -143,6 +168,7 @@ function New-ContractReviewPrompt {
         'Return only the schema-constrained JSON envelope. Use status blocker with a precise reason and empty arrays if rules or settings conflict.',
         "Only these response arrays may be non-empty for ${Role}: $([string]::Join(', ', $allowedFields)). All other response arrays must be empty.",
         "Evidence excerpt contract: $(Get-ContractReviewEvidenceRequirement) Evidence must also name the immutable input and a human-readable locator. A MOVE preserves original rule bytes and its current tag. A tag change is separate metadata, never hidden in a move.",
+        "Uniqueness contract: $(Get-ContractReviewUniquenessRequirement)",
         '',
         'ROLE PAYLOAD:',
         $payloadText,
@@ -211,6 +237,15 @@ function Assert-ContractReviewUniqueIds {
     return $ids
 }
 
+function Assert-ContractReviewUniqueStrings {
+    param([AllowNull()][AllowEmptyCollection()][object[]]$Values, [Parameter(Mandatory = $true)][string]$Label)
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($value in @($Values)) {
+        $text = [string]$value
+        if (-not $seen.Add($text)) { throw "$Label contains duplicate value '$text'." }
+    }
+}
+
 function Assert-ContractReviewResponse {
     param([object]$Response, [string]$Role)
     $arrays = $script:ContractReviewResponseArrays
@@ -231,6 +266,8 @@ function Assert-ContractReviewResponse {
             Assert-ContractReviewEvidence -Evidence @($finding.evidence) -Label "finding $($finding.id)"
             if (@($finding.evidence).Count -eq 0) { throw "Finding $($finding.id) requires source evidence." }
             Assert-ContractReviewExactProperties -Value $finding.placement -Required @('disposition','destinations','existingTag','proposedTags','rationale') -Label "finding $($finding.id) placement"
+            Assert-ContractReviewUniqueStrings -Values @($finding.placement.destinations) -Label "finding $($finding.id) placement destinations"
+            Assert-ContractReviewUniqueStrings -Values @($finding.placement.proposedTags) -Label "finding $($finding.id) placement proposedTags"
         }
     }
     if ($Role -eq 'comparator') {
@@ -240,6 +277,8 @@ function Assert-ContractReviewResponse {
             if ([string]$item.classification -notin @('AGREED','RESOLVED_BY_READING','ONE_SIDED','NEEDS_PROOF','USER_DECISION')) { throw "Invalid comparison classification '$($item.classification)'." }
             Assert-ContractReviewEvidence -Evidence @($item.evidence) -Label "classification $($item.id)"
             if (@($item.evidence).Count -eq 0) { throw "Classification $($item.id) requires source evidence." }
+            Assert-ContractReviewUniqueStrings -Values @($item.reviewerAFindingIds) -Label "classification $($item.id) reviewerAFindingIds"
+            Assert-ContractReviewUniqueStrings -Values @($item.reviewerBFindingIds) -Label "classification $($item.id) reviewerBFindingIds"
         }
     }
     if ($Role -eq 'proof-reviewer') {
@@ -248,6 +287,7 @@ function Assert-ContractReviewResponse {
             Assert-ContractReviewExactProperties -Value $proof -Required @('classificationId','findingIds','position','evidence','rationale') -Label 'proof'
             if ([string]$proof.position -notin @('CONFIRM','WITHDRAW','QUALIFY','USER_DECISION')) { throw "Invalid proof position '$($proof.position)'." }
             Assert-ContractReviewEvidence -Evidence @($proof.evidence) -Label "proof $($proof.classificationId)"
+            Assert-ContractReviewUniqueStrings -Values @($proof.findingIds) -Label "proof $($proof.classificationId) findingIds"
         }
     }
     if ($Role -eq 'validator') {
@@ -258,8 +298,17 @@ function Assert-ContractReviewResponse {
             if ([string]$resolution.outcome -notin @('ACCEPT_A','ACCEPT_B','ACCEPT_BOTH','REJECT_BOTH','USER_DECISION')) { throw "Invalid resolution outcome '$($resolution.outcome)'." }
             Assert-ContractReviewEvidence -Evidence @($resolution.evidence) -Label "resolution $($resolution.classificationId)"
             if (@($resolution.evidence).Count -eq 0) { throw "Resolution $($resolution.classificationId) requires source evidence." }
+            Assert-ContractReviewUniqueStrings -Values @($resolution.acceptedFindingIds) -Label "resolution $($resolution.classificationId) acceptedFindingIds"
         }
-        foreach ($unresolved in @($Response.unresolved)) { Assert-ContractReviewExactProperties -Value $unresolved -Required @('id','reason','options') -Label 'unresolved item' }
+        foreach ($unresolved in @($Response.unresolved)) {
+            Assert-ContractReviewExactProperties -Value $unresolved -Required @('id','reason','options') -Label 'unresolved item'
+            Assert-ContractReviewUniqueStrings -Values @($unresolved.options) -Label "unresolved item $($unresolved.id) options"
+        }
+        foreach ($row in @($Response.stage1Manifest)) {
+            Assert-ContractReviewExactProperties -Value $row -Required @('start','end','destinations','name','disposition','perDestinationNames') -Label 'Stage 1 row'
+            Assert-ContractReviewUniqueStrings -Values @($row.destinations) -Label 'Stage 1 row destinations'
+            if ($null -ne $row.perDestinationNames) { Assert-ContractReviewUniqueStrings -Values @($row.perDestinationNames) -Label 'Stage 1 row perDestinationNames' }
+        }
     }
 }
 
@@ -320,6 +369,8 @@ function Write-ContractReviewStage1Manifest {
     foreach ($row in @($Rows)) {
         Assert-ContractReviewExactProperties -Value $row -Required @('start','end','destinations','name','disposition','perDestinationNames') -Label 'Stage 1 row'
         if ([string]$row.disposition -notin @('MOVE','SPLIT','PHASE-2')) { throw "Unsupported Stage 1 disposition '$($row.disposition)'." }
+        Assert-ContractReviewUniqueStrings -Values @($row.destinations) -Label 'Stage 1 row destinations'
+        if ($null -ne $row.perDestinationNames) { Assert-ContractReviewUniqueStrings -Values @($row.perDestinationNames) -Label 'Stage 1 row perDestinationNames' }
         $line = "$($row.start)-$($row.end)`t$(@($row.destinations) -join ',')`t$($row.name)`t$($row.disposition)"
         if ($null -ne $row.perDestinationNames) { $line += "`t$(@($row.perDestinationNames) -join ',')" }
         $lines += $line

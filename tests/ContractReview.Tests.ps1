@@ -45,11 +45,14 @@ try{
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'tests') -Destination $runnerRoot -Recurse
     $script:runner=Join-Path $runnerRoot 'Start-ContractReview.ps1';$script:fake=Join-Path $runnerRoot 'tests\fixtures\Fake-ReviewAgent.ps1'
     Import-Module (Join-Path $runnerRoot 'contract-review\ContractReview.psm1') -Force
-    . (Join-Path $runnerRoot 'contract-review\ContractReview.Runtime.ps1');. (Join-Path $runnerRoot 'contract-review\ContractReview.Validation.ps1')
+    . (Join-Path $runnerRoot 'contract-review\ContractReview.Core.ps1');. (Join-Path $runnerRoot 'contract-review\ContractReview.Validation.ps1')
     $blindSchemaPath=Join-Path $requests 'blind-response.schema.json';$validatorSchemaPath=Join-Path $requests 'validator-response.schema.json';$baseSchemaPath=Join-Path $runnerRoot 'schemas\agent-response.schema.json'
     [void](New-ContractReviewRoleSchema -BaseSchemaPath $baseSchemaPath -Role blind-reviewer -Path $blindSchemaPath)
     [void](New-ContractReviewRoleSchema -BaseSchemaPath $baseSchemaPath -Role validator -Path $validatorSchemaPath)
     $blindSchema=Get-Content $blindSchemaPath -Raw|ConvertFrom-Json;$validatorSchema=Get-Content $validatorSchemaPath -Raw|ConvertFrom-Json
+    Assert-That (([regex]::Matches((Get-Content $baseSchemaPath -Raw),'"uniqueItems"')).Count-eq9) 'Canonical schema lost a required uniqueness constraint.'
+    Assert-That ((Get-Content $blindSchemaPath -Raw)-notmatch '"uniqueItems"') 'Provider-facing blind schema leaked unsupported uniqueItems.'
+    Assert-That ((Get-Content $validatorSchemaPath -Raw)-notmatch '"uniqueItems"') 'Provider-facing validator schema leaked unsupported uniqueItems.'
     Assert-That ($blindSchema.properties.stage1Manifest.maxItems-eq0-and$blindSchema.properties.classifications.maxItems-eq0) 'Blind schema did not mechanically forbid role-inappropriate arrays.'
     Assert-That ($validatorSchema.properties.stage1Manifest.PSObject.Properties.Name-notcontains'maxItems'-and$validatorSchema.properties.findings.maxItems-eq0) 'Validator schema did not allow only validator-owned arrays.'
     $evidenceRequirement=Get-ContractReviewEvidenceRequirement
@@ -57,6 +60,7 @@ try{
     $rolePrompt=New-ContractReviewPrompt -Role blind-reviewer -Request ([pscustomobject]@{reviewSubject='subject';neutralQuestion='question'}) -InputBundle 'input' -Payload $null
     Assert-That ($rolePrompt-match'Only these response arrays may be non-empty for blind-reviewer: findings\.') 'Blind prompt omitted its explicit role-field contract.'
     Assert-That ($rolePrompt.Contains($evidenceRequirement)) 'Blind prompt omitted the canonical evidence-excerpt contract.'
+    Assert-That ($rolePrompt.Contains((Get-ContractReviewUniquenessRequirement))) 'Blind prompt omitted the canonical uniqueness contract.'
     New-Item -ItemType Directory -Path (Join-Path $target 'contracts'),(Join-Path $target '.design'),(Join-Path $target 'tools\ai')|Out-Null
     [IO.File]::WriteAllText((Join-Path $target 'contracts\sample.md'),"# Sample`n`nA generic rule.",[Text.UTF8Encoding]::new($false))
     Set-Content (Join-Path $target 'AI_RULES.md') 'Rules apply. The epic governs review protocol.' -Encoding utf8
@@ -69,7 +73,7 @@ try{
     Write-Host 'adapter boundary tests...'
     $adapterPrompt=Join-Path $requests 'adapter-prompt.txt';$adapterOutput=Join-Path $requests 'adapter-output.json';$adapterMetadata=Join-Path $requests 'adapter-metadata.json'
     Set-Content $adapterPrompt 'Return the empty valid envelope.' -Encoding utf8
-    $env:CONTRACT_REVIEW_PROMPT_FILE=$adapterPrompt;$env:CONTRACT_REVIEW_OUTPUT_PATH=$adapterOutput;$env:CONTRACT_REVIEW_METADATA_PATH=$adapterMetadata;$env:CONTRACT_REVIEW_SCHEMA_PATH=Join-Path $runnerRoot 'schemas\agent-response.schema.json'
+    $env:CONTRACT_REVIEW_PROMPT_FILE=$adapterPrompt;$env:CONTRACT_REVIEW_OUTPUT_PATH=$adapterOutput;$env:CONTRACT_REVIEW_METADATA_PATH=$adapterMetadata;$env:CONTRACT_REVIEW_SCHEMA_PATH=$blindSchemaPath
     $env:CONTRACT_REVIEW_MODEL='claude-fable-5';$env:CONTRACT_REVIEW_PROVIDER_COMMAND=Join-Path $runnerRoot 'tests\fixtures\Fake-StructuredCli.ps1'
     & pwsh -NoLogo -NoProfile -NonInteractive -File (Join-Path $runnerRoot 'contract-review\Invoke-ClaudeReview.ps1');if($LASTEXITCODE-ne0){throw 'Claude adapter fixture failed.'}
     $claudeMeta=Get-Content $adapterMetadata -Raw|ConvertFrom-Json;Assert-That ($claudeMeta.safeMode-and$claudeMeta.promptTransport-eq'stdin'-and@($claudeMeta.tools).Count-eq0) 'Claude adapter isolation flags were not enforced.'
@@ -83,6 +87,9 @@ try{
     Write-Host 'adapter boundary tests passed'
 
     $env:CONTRACT_REVIEW_CLAUDE_COMMAND=Join-Path $runnerRoot 'tests\fixtures\Fake-StructuredCli.ps1';$env:CONTRACT_REVIEW_CODEX_COMMAND=$env:CONTRACT_REVIEW_CLAUDE_COMMAND
+    $unlaunchable=Join-Path $requests 'unlaunchable.exe';[IO.File]::WriteAllBytes($unlaunchable,[byte[]](0,1,2,3))
+    $selected=Select-ContractReviewProviderCommand -Provider codex -Candidates @($unlaunchable,$env:CONTRACT_REVIEW_CODEX_COMMAND)
+    Assert-That ($selected.path-eq(Resolve-Path $env:CONTRACT_REVIEW_CODEX_COMMAND).Path-and$selected.version-eq'fake-structured-cli 2.0') 'Provider resolver did not skip an unlaunchable earlier candidate.'
     $readinessFlag=Join-Path $runnerRoot 'tests\fixtures\provider-logged-out.flag'
     $seedRequest=New-Request 'fixture-provider-seed-auth-001';New-Item -ItemType File -Path $readinessFlag|Out-Null
     $seedBlocked=$false;try{Get-ContractReviewApproval -RequestPath $seedRequest -RunnerRoot $runnerRoot -ClaudeAdapter $script:fake -CodexAdapter $script:fake -ClaudeModel 'claude-fable-5' -CodexModel 'gpt-5.6-sol' -CodexReasoningEffort max -RoleTimeoutSeconds 20 -GitTimeoutSeconds 20 -SplitterTimeoutSeconds 20|Out-Null}catch{$seedBlocked=$_.Exception.Message-match'claude.*not authenticated'}
@@ -99,7 +106,7 @@ try{
     Assert-That (@($default.Packet.reviewerA.findings).Count-eq1-and@($default.Packet.comparison.classifications).Count-eq1) 'Packet omitted initial/comparison results.'
     Assert-That (@($default.Packet.validation.resolutions).Count-eq1-and@($default.Packet.unresolved).Count-eq1) 'Packet omitted resolutions/unresolved choices.'
     $execution=Get-Content (Join-Path $default.RunDirectory 'execution-manifest.json') -Raw|ConvertFrom-Json
-    Assert-That (@($execution.providers.PSObject.Properties.Name).Count-eq6-and$execution.providers.reviewerAProof.commandSha256-match'^[a-f0-9]{64}$') 'Execution manifest omitted proof-role provider command bindings.'
+    Assert-That ($execution.protocolVersion-eq3-and@($execution.providers.PSObject.Properties.Name).Count-eq6-and$execution.providers.reviewerAProof.commandSha256-match'^[a-f0-9]{64}$'-and-not[string]::IsNullOrWhiteSpace([string]$execution.providers.reviewerAProof.commandVersion)) 'Execution manifest omitted versioned proof-role provider command bindings.'
     $invocation=Get-Content (Join-Path $default.RunDirectory 'reviewer-a.invocation.json') -Raw|ConvertFrom-Json;Assert-That (-not[string]::IsNullOrWhiteSpace([string]$invocation.adapterProcessStartTimeUtc)) 'Invocation receipt omitted adapter process identity.'
     $promptA=Get-FileHash (Join-Path $default.RunDirectory 'reviewer-a.prompt.txt');$promptB=Get-FileHash (Join-Path $default.RunDirectory 'reviewer-b.prompt.txt')
     Assert-That ($promptA.Hash-eq$promptB.Hash) 'Blind reviewers did not receive byte-identical prompts.'
@@ -121,6 +128,8 @@ try{
 
     $wrappedEvidence=Invoke-FakeRun 'fixture-wrapped-evidence-001' 'WRAPPED_EVIDENCE';Assert-That ($wrappedEvidence.Packet.status-eq'USER_DECISION_REQUIRED') 'Whitespace-only Markdown wrapping invalidated contiguous source evidence.'
     foreach($case in @(@('OMIT_FINDING','omitted'),@('UNKNOWN_REF','unknown'),@('PROOF_GAP','proof IDs'),@('PROOF_FINDING_GAP','every finding'),@('RESOLUTION_GAP','resolve every'),@('WRONG_RESOLUTION_FINDING','acceptedFindingIds'),@('BAD_EVIDENCE','contiguous source passage'),@('ELLIPSIS_EVIDENCE','contiguous source passage'),@('ROLE_LEAK','role-inappropriate'))){$run=Invoke-FakeRun ("fixture-{0}-001"-f$case[0].ToLower()) $case[0];Assert-That ($run.Packet.status-eq'FAILED') "$($case[0]) did not fail";Assert-That ($run.Packet.blocker-match$case[1]) "$($case[0]) failure was not explicit: $($run.Packet.blocker)"}
+    foreach($scenario in @('DUPLICATE_DESTINATIONS','DUPLICATE_PROPOSED_TAGS','DUPLICATE_A_FINDING_REFS','DUPLICATE_B_FINDING_REFS','DUPLICATE_PROOF_FINDING_REFS','DUPLICATE_ACCEPTED_FINDING_REFS','DUPLICATE_OPTIONS')){$run=Invoke-FakeRun ("fixture-{0}-001"-f$scenario.ToLower()) $scenario;Assert-That ($run.Packet.status-eq'FAILED'-and$run.Packet.blocker-match'duplicate') "$scenario was not mechanically rejected as a duplicate: $($run.Packet.blocker)"}
+    foreach($scenario in @('DUPLICATE_STAGE_DESTINATIONS','DUPLICATE_STAGE_NAMES')){$run=Invoke-FakeRun ("fixture-{0}-001"-f$scenario.ToLower()) $scenario 'stage1';Assert-That ($run.Packet.status-eq'FAILED'-and$run.Packet.blocker-match'duplicate') "$scenario was not mechanically rejected as a duplicate: $($run.Packet.blocker)"}
     $blocked=Invoke-FakeRun 'fixture-blocker-001' 'BLOCKER';Assert-That ($blocked.Packet.status-eq'BLOCKED_RULES_OR_SETTINGS') 'Rules/settings blocker did not stop distinctly.'
     $providerBlocked=Invoke-FakeRun 'fixture-provider-config-blocker-001' '' 'decision' (Join-Path $runnerRoot 'tests\fixtures\Fake-ProviderConfigFailure.ps1')
     Assert-That ($providerBlocked.Packet.status-eq'BLOCKED_RULES_OR_SETTINGS'-and$providerBlocked.Packet.blocker-match'provider configuration') 'Provider configuration rejection was not reported as a rules/settings blocker.'

@@ -1,6 +1,6 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'ContractReview.Runtime.ps1')
+. (Join-Path $PSScriptRoot 'ContractReview.Core.ps1')
 function Repair-InterruptedContractReview {
     [CmdletBinding()]
     param([Parameter(Mandatory=$true)][string]$RunDirectory,[Parameter(Mandatory=$true)][string]$Reason,[string]$RunnerRoot=(Split-Path -Parent $PSScriptRoot),[ValidateRange(1,3600)][int]$GitTimeoutSeconds=60)

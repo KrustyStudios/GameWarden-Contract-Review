@@ -20,6 +20,8 @@ if($scenario -eq 'BLOCKER'){$response.status='blocker';$response.reason='Pinned 
 switch($role){
     'blind-reviewer' {
         if($artifact -eq 'reviewer-a'){$response.findings=@(Finding A1 'Parent owns the generic rule.')}else{$response.findings=@(Finding B1 'Child changes the generic rule.')}
+        if($scenario -eq 'DUPLICATE_DESTINATIONS'){$response.findings[0].placement.destinations=@('sample-owner','sample-owner')}
+        if($scenario -eq 'DUPLICATE_PROPOSED_TAGS'){$response.findings[0].placement.proposedTags=@('[sample]','[sample]')}
         if($scenario -eq 'PROOF_FINDING_GAP' -and $artifact -eq 'reviewer-a'){$response.findings+=@(Finding A2 'A second parent-side finding.')}
         if($scenario -eq 'ROLE_SCHEMA_STAGE1' -and $roleSchema.properties.stage1Manifest.maxItems-ne0){$response.stage1Manifest=@([ordered]@{start=1;end=3;destinations=@('sample-owner');name='[sample]';disposition='MOVE';perDestinationNames=$null})}
     }
@@ -28,16 +30,22 @@ switch($role){
         if($scenario -eq 'OMIT_FINDING'){$response.classifications[0].reviewerBFindingIds=@()}
         if($scenario -eq 'UNKNOWN_REF'){$response.classifications[0].reviewerAFindingIds=@('missing')}
         if($scenario -eq 'PROOF_FINDING_GAP'){$response.classifications[0].reviewerAFindingIds=@('A1','A2')}
+        if($scenario -eq 'DUPLICATE_A_FINDING_REFS'){$response.classifications[0].reviewerAFindingIds=@('A1','A1')}
+        if($scenario -eq 'DUPLICATE_B_FINDING_REFS'){$response.classifications[0].reviewerBFindingIds=@('B1','B1')}
         if($scenario -eq 'ROLE_LEAK'){$response.findings=@(Finding L1 'Wrong role field.')}
     }
-    'proof-reviewer' { $response.proofs=@([ordered]@{classificationId='C1';findingIds=@($(if($artifact -eq 'reviewer-a-proof'){'A1'}else{'B1'}));position='CONFIRM';evidence=Evidence;rationale='The input supports this position.'});if($scenario -eq 'PROOF_GAP'){$response.proofs=@()} }
+    'proof-reviewer' { $response.proofs=@([ordered]@{classificationId='C1';findingIds=@($(if($artifact -eq 'reviewer-a-proof'){'A1'}else{'B1'}));position='CONFIRM';evidence=Evidence;rationale='The input supports this position.'});if($scenario -eq 'PROOF_GAP'){$response.proofs=@()};if($scenario -eq 'DUPLICATE_PROOF_FINDING_REFS'){$response.proofs[0].findingIds=@($response.proofs[0].findingIds[0],$response.proofs[0].findingIds[0])} }
     'validator' {
         $outcome=if($scenario -in @('COMPLETE','STAGE1','ROLE_SCHEMA_STAGE1')){'ACCEPT_A'}else{'USER_DECISION'}
         $response.resolutions=@([ordered]@{classificationId='C1';outcome=$outcome;acceptedFindingIds=@($(if($outcome -eq 'ACCEPT_A'){'A1'}));evidence=Evidence;rationale='Rechecked against the input.'})
         if($outcome -eq 'USER_DECISION'){$response.unresolved=@([ordered]@{id='C1';reason='The evidence leaves a policy choice.';options=@('parent','child')})}
         if($scenario -eq 'RESOLUTION_GAP'){$response.resolutions=@();$response.unresolved=@()}
         if($scenario -eq 'WRONG_RESOLUTION_FINDING'){$response.resolutions[0].outcome='ACCEPT_A';$response.resolutions[0].acceptedFindingIds=@('B1');$response.unresolved=@()}
+        if($scenario -eq 'DUPLICATE_ACCEPTED_FINDING_REFS'){$response.resolutions[0].outcome='ACCEPT_A';$response.resolutions[0].acceptedFindingIds=@('A1','A1');$response.unresolved=@()}
+        if($scenario -eq 'DUPLICATE_OPTIONS'){$response.unresolved[0].options=@('parent','parent')}
         if($scenario -in @('STAGE1','ROLE_SCHEMA_STAGE1')){$response.stage1Manifest=@([ordered]@{start=1;end=3;destinations=@('sample-owner');name='[sample]';disposition='MOVE';perDestinationNames=$null})}
+        if($scenario -eq 'DUPLICATE_STAGE_DESTINATIONS'){$response.resolutions[0].outcome='ACCEPT_A';$response.resolutions[0].acceptedFindingIds=@('A1');$response.unresolved=@();$response.stage1Manifest=@([ordered]@{start=1;end=3;destinations=@('sample-owner','sample-owner');name='[sample]';disposition='MOVE';perDestinationNames=$null})}
+        if($scenario -eq 'DUPLICATE_STAGE_NAMES'){$response.resolutions[0].outcome='ACCEPT_A';$response.resolutions[0].acceptedFindingIds=@('A1');$response.unresolved=@();$response.stage1Manifest=@([ordered]@{start=1;end=3;destinations=@('sample-owner');name='[sample]';disposition='MOVE';perDestinationNames=@('[sample]','[sample]')})}
         if($scenario -eq 'STAGE_WITH_UNRESOLVED'){$response.stage1Manifest=@([ordered]@{start=1;end=3;destinations=@('sample-owner');name='[sample]';disposition='MOVE';perDestinationNames=$null})}
     }
     default {throw "Unexpected fake role: $role"}

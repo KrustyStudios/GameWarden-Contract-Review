@@ -61,12 +61,39 @@ function Stop-ContractReviewProcessTree {
     }
 }
 
+function Select-ContractReviewProviderCommand {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('claude','codex')][string]$Provider,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Candidates
+    )
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($candidate in @($Candidates)) {
+        if ([string]::IsNullOrWhiteSpace($candidate) -or -not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        $path = (Resolve-Path -LiteralPath $candidate).Path
+        if (-not $seen.Add($path)) { continue }
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $global:LASTEXITCODE = 0
+            $versionOutput = & $path '--version' 2>&1
+            if ($LASTEXITCODE -ne 0) { continue }
+            $version = ($versionOutput -join ' ').Trim()
+            if ([string]::IsNullOrWhiteSpace($version)) { continue }
+            return [ordered]@{ path=$path; sha256=Get-ContractReviewSha256 -Path $path; version=$version }
+        } catch { Write-Verbose "Skipping unusable $Provider command '$path': $($_.Exception.Message)" }
+        finally { $ErrorActionPreference = $previousErrorActionPreference }
+    }
+    throw "No runnable $Provider CLI command could be resolved from $($seen.Count) existing candidate(s)."
+}
+
 function Resolve-ContractReviewProviderCommand {
     param([Parameter(Mandatory = $true)][ValidateSet('claude','codex')][string]$Provider)
     $overrideName = if ($Provider -eq 'claude') { 'CONTRACT_REVIEW_CLAUDE_COMMAND' } else { 'CONTRACT_REVIEW_CODEX_COMMAND' }
     $override = [Environment]::GetEnvironmentVariable($overrideName, 'Process')
     $candidates = [System.Collections.Generic.List[string]]::new()
-    if (-not [string]::IsNullOrWhiteSpace($override)) { $candidates.Add($override) }
+    if (-not [string]::IsNullOrWhiteSpace($override)) {
+        return Select-ContractReviewProviderCommand -Provider $Provider -Candidates @($override)
+    }
     $appData = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
     if ($Provider -eq 'claude') {
         $candidates.Add((Join-Path $appData 'npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe'))
@@ -75,19 +102,23 @@ function Resolve-ContractReviewProviderCommand {
             if ($command) { $candidates.Add($command.Path) }
         }
     } else {
+        $managedBin = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) 'OpenAI\Codex\bin'
+        if (Test-Path -LiteralPath $managedBin -PathType Container) {
+            Get-ChildItem -LiteralPath $managedBin -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending | ForEach-Object {
+                $managedCommand = Join-Path $_.FullName 'codex.exe'
+                if (Test-Path -LiteralPath $managedCommand -PathType Leaf) { $candidates.Add($managedCommand) }
+            }
+        }
+        $npmPackage = Join-Path $appData 'npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor'
+        if (Test-Path -LiteralPath $npmPackage -PathType Container) {
+            Get-ChildItem -LiteralPath $npmPackage -Recurse -File -Filter codex.exe -ErrorAction SilentlyContinue | Sort-Object FullName | ForEach-Object { $candidates.Add($_.FullName) }
+        }
         foreach ($name in @('codex.exe','codex.cmd')) {
-            $command = Get-Command $name -ErrorAction SilentlyContinue
-            if ($command) { $candidates.Add($command.Path) }
+            foreach ($command in @(Get-Command $name -All -ErrorAction SilentlyContinue)) { $candidates.Add($command.Path) }
         }
         $candidates.Add((Join-Path $appData 'npm\codex.cmd'))
     }
-    foreach ($candidate in $candidates) {
-        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
-            $path = (Resolve-Path -LiteralPath $candidate).Path
-            return [ordered]@{ path = $path; sha256 = Get-ContractReviewSha256 -Path $path }
-        }
-    }
-    throw "No $Provider CLI command could be resolved. Set $overrideName before generating approval."
+    return Select-ContractReviewProviderCommand -Provider $Provider -Candidates @($candidates)
 }
 
 function New-ContractReviewProcessStartInfo {

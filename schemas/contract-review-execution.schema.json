@@ -5,7 +5,7 @@
   "additionalProperties": false,
   "required": ["protocolVersion", "requestId", "requestSha256", "targetRepository", "targetRevision", "pinnedObjects", "runnerFiles", "reviewMode", "providers", "timeouts", "cleanup"],
   "properties": {
-    "protocolVersion": { "const": 2 },
+    "protocolVersion": { "const": 3 },
     "requestId": { "type": "string", "minLength": 1 },
     "requestSha256": { "$ref": "#/$defs/sha256" },
     "targetRepository": { "type": "string", "minLength": 1 },
@@ -53,13 +53,14 @@
     "provider": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["provider", "model", "reasoningEffort", "commandPath", "commandSha256"],
+      "required": ["provider", "model", "reasoningEffort", "commandPath", "commandSha256", "commandVersion"],
       "properties": {
         "provider": { "enum": ["claude", "codex"] },
         "model": { "type": "string", "minLength": 1 },
         "reasoningEffort": { "type": ["string", "null"] },
         "commandPath": { "type": "string", "minLength": 1 },
-        "commandSha256": { "$ref": "#/$defs/sha256" }
+        "commandSha256": { "$ref": "#/$defs/sha256" },
+        "commandVersion": { "type": "string", "minLength": 1 }
       }
     }
   }
