@@ -116,6 +116,16 @@ function Copy-ContractReviewInputs {
     }
 }
 
+function Add-ContractReviewRoleReceipts {
+    param([string]$ArtifactName,[System.Collections.Generic.List[string]]$Receipts)
+    foreach ($name in @(
+        "$ArtifactName.prompt.txt","$ArtifactName.response-schema.json","$ArtifactName.stdout.log",
+        "$ArtifactName.stderr.log","$ArtifactName.provider.json","$ArtifactName.invocation.json","$ArtifactName.json"
+    )) {
+        if (-not $Receipts.Contains($name)) { [void]$Receipts.Add($name) }
+    }
+}
+
 function Invoke-ContractReviewRole {
     param(
         [string]$Adapter,[string]$Role,[string]$ArtifactName,[ValidateSet('claude','codex')][string]$Provider,
@@ -135,7 +145,7 @@ function Invoke-ContractReviewRole {
         adapterProcessId=$null; adapterProcessStartTimeUtc=$null; startedUtc=[DateTime]::UtcNow.ToString('o'); completedUtc=$null; status='starting'; providerMetadata=$null
     }
     Write-ContractReviewAtomicJson -Path $invocationPath -Value $invocation
-    foreach ($name in @("$ArtifactName.prompt.txt",$responseSchemaName,"$ArtifactName.stdout.log","$ArtifactName.stderr.log","$ArtifactName.provider.json","$ArtifactName.invocation.json","$ArtifactName.json")) { [void]$Receipts.Add($name) }
+    Add-ContractReviewRoleReceipts -ArtifactName $ArtifactName -Receipts $Receipts
     $environment=@{
         CONTRACT_REVIEW_ROLE=$Role; CONTRACT_REVIEW_ARTIFACT_NAME=$ArtifactName; CONTRACT_REVIEW_PROMPT_FILE=$promptPath; CONTRACT_REVIEW_OUTPUT_PATH=$outputPath
         CONTRACT_REVIEW_METADATA_PATH=$metadataPath; CONTRACT_REVIEW_MODEL=$Model; CONTRACT_REVIEW_REASONING_EFFORT=$ReasoningEffort
@@ -180,6 +190,126 @@ function Invoke-ContractReviewRole {
         throw $failure
     }
     finally { $invocation.completedUtc=[DateTime]::UtcNow.ToString('o'); Write-ContractReviewAtomicJson -Path $invocationPath -Value $invocation }
+}
+
+function Test-ContractReviewParallelRoleCompleted {
+    param([Parameter(Mandatory = $true)][string]$InvocationPath)
+    if (-not (Test-Path -LiteralPath $InvocationPath -PathType Leaf)) { return $false }
+    $invocation = Read-ContractReviewJson -Path $InvocationPath -Label 'invocation receipt'
+    return -not [string]::IsNullOrWhiteSpace([string]$invocation.completedUtc)
+}
+
+function Stop-ContractReviewParallelRoleProcess {
+    param([Parameter(Mandatory = $true)][string]$InvocationPath)
+    if (-not (Test-Path -LiteralPath $InvocationPath -PathType Leaf)) { return }
+    try {
+        Stop-ContractReviewRecordedProcessTree -InvocationPath $InvocationPath | Out-Null
+    } catch {
+        $terminationFailure = $_
+        if (-not (Test-ContractReviewParallelRoleCompleted -InvocationPath $InvocationPath)) { throw $terminationFailure }
+        if (Get-ContractReviewRecordedProcess -InvocationPath $InvocationPath) { throw $terminationFailure }
+    }
+}
+
+function Stop-ContractReviewParallelRole {
+    param([Parameter(Mandatory = $true)][object]$Entry)
+    if ($Entry.Job.State -in @('NotStarted','Running')) {
+        Wait-Job -Job $Entry.Job -Timeout 1 -ErrorAction SilentlyContinue | Out-Null
+    }
+    if (Test-ContractReviewParallelRoleCompleted -InvocationPath $Entry.InvocationPath) {
+        if ($Entry.Job.State -in @('NotStarted','Running')) { Stop-Job -Job $Entry.Job -ErrorAction SilentlyContinue }
+        return
+    }
+    Stop-ContractReviewParallelRoleProcess -InvocationPath $Entry.InvocationPath
+    if ($Entry.Job.State -in @('NotStarted','Running')) {
+        Stop-Job -Job $Entry.Job -ErrorAction SilentlyContinue
+    }
+    Stop-ContractReviewParallelRoleProcess -InvocationPath $Entry.InvocationPath
+}
+
+function Invoke-ContractReviewParallelRoles {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$ReviewerAParameters,
+        [Parameter(Mandatory = $true)][hashtable]$ReviewerBParameters,
+        [Parameter(Mandatory = $true)][System.Collections.Generic.List[string]]$Receipts
+    )
+    $modulePath = Join-Path $PSScriptRoot 'ContractReview.psm1'
+    $definitions = @(
+        [pscustomobject]@{ Name='reviewer-a'; Parameters=$ReviewerAParameters },
+        [pscustomobject]@{ Name='reviewer-b'; Parameters=$ReviewerBParameters }
+    )
+    $entries = [System.Collections.Generic.List[object]]::new()
+    $results = @{}
+    $firstFailure = $null
+    $stopFailures = [System.Collections.Generic.List[string]]::new()
+    try {
+        Get-Command Start-ThreadJob -ErrorAction Stop | Out-Null
+        foreach ($definition in $definitions) {
+            Add-ContractReviewRoleReceipts -ArtifactName $definition.Name -Receipts $Receipts
+            $parameters = @{}
+            foreach ($parameter in $definition.Parameters.GetEnumerator()) { $parameters[$parameter.Key] = $parameter.Value }
+            $parameters.Receipts = [System.Collections.Generic.List[string]]::new()
+            $job = Start-ThreadJob -Name "contract-review-$($definition.Name)" -ArgumentList $modulePath,$parameters -ScriptBlock {
+                param($ModulePath,$Parameters)
+                $module = Import-Module $ModulePath -Force -PassThru
+                try {
+                    $response = & $module { param($RoleParameters) Invoke-ContractReviewRole @RoleParameters } $Parameters
+                    [pscustomobject]@{ Succeeded=$true; Response=$response; ErrorMessage=$null }
+                } catch {
+                    [pscustomobject]@{ Succeeded=$false; Response=$null; ErrorMessage=$_.Exception.Message }
+                }
+            }
+            $entries.Add([pscustomobject]@{
+                Name=$definition.Name
+                Job=$job
+                InvocationPath=Join-Path ([string]$definition.Parameters.RunDirectory) "$($definition.Name).invocation.json"
+            })
+        }
+        Write-Host ("[{0}] both blind reviewers are running concurrently" -f [DateTime]::Now.ToString('HH:mm:ss'))
+        $pending = @($entries)
+        $nextProgress = [DateTime]::UtcNow.AddSeconds(30)
+        while ($pending.Count -gt 0) {
+            $finished = @($pending | Where-Object { $_.Job.State -notin @('NotStarted','Running') })
+            foreach ($entry in $finished) {
+                $jobOutput = @(Receive-Job -Job $entry.Job -ErrorAction SilentlyContinue)
+                $result = @($jobOutput | Where-Object { $_.PSObject.Properties.Name -contains 'Succeeded' } | Select-Object -Last 1)
+                if ($result.Count -eq 0) {
+                    $reason = if ($entry.Job.JobStateInfo.Reason) { $entry.Job.JobStateInfo.Reason.Message } else { "parallel role $($entry.Name) ended in state $($entry.Job.State)" }
+                    $result = @([pscustomobject]@{ Succeeded=$false; Response=$null; ErrorMessage=$reason })
+                }
+                $results[$entry.Name] = $result[0]
+                $pending = @($pending | Where-Object { $_.Job.Id -ne $entry.Job.Id })
+                if (-not $result[0].Succeeded -and -not $firstFailure) {
+                    $firstFailure = [string]$result[0].ErrorMessage
+                    foreach ($peer in $pending) {
+                        try { Stop-ContractReviewParallelRole -Entry $peer }
+                        catch { $stopFailures.Add("$($peer.Name): $($_.Exception.Message)") }
+                    }
+                }
+            }
+            if ($pending.Count -gt 0) {
+                if ([DateTime]::UtcNow -ge $nextProgress) {
+                    Write-Host ("[{0}] blind review pair still running" -f [DateTime]::Now.ToString('HH:mm:ss'))
+                    $nextProgress = [DateTime]::UtcNow.AddSeconds(30)
+                }
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        if ($stopFailures.Count -gt 0) { throw "$firstFailure; peer termination failed: $([string]::Join('; ', $stopFailures))" }
+        if ($firstFailure) { throw $firstFailure }
+        return [pscustomobject]@{ ReviewerA=$results['reviewer-a'].Response; ReviewerB=$results['reviewer-b'].Response }
+    } finally {
+        foreach ($entry in $entries) {
+            if ($entry.Job.State -in @('NotStarted','Running')) {
+                try { Stop-ContractReviewParallelRole -Entry $entry }
+                catch { $stopFailures.Add("$($entry.Name): $($_.Exception.Message)") }
+            }
+            Remove-Job -Job $entry.Job -Force -ErrorAction SilentlyContinue
+        }
+        if ($stopFailures.Count -gt 0) {
+            throw "Blind-review cleanup failed: $([string]::Join('; ', $stopFailures))"
+        }
+    }
 }
 
 function Remove-ContractReviewWorktree {
@@ -242,8 +372,15 @@ function Start-ContractReview {
         $blindPrompt=New-ContractReviewPrompt -Role 'blind-reviewer' -Request $request -InputBundle $inputBundle -Payload $basePayload
         $reviewerAProvider=if ($AllCodex) { 'codex' } else { 'claude' }; $reviewerAAdapter=if ($AllCodex) { $CodexAdapter } else { $ClaudeAdapter }
         $reviewerAModel=if ($AllCodex) { $CodexModel } else { $ClaudeModel }; $reviewerAEffort=if ($AllCodex) { $CodexReasoningEffort } else { $null }
-        $reviewerA=Invoke-ContractReviewRole -Adapter $reviewerAAdapter -Role blind-reviewer -ArtifactName reviewer-a -Provider $reviewerAProvider -Model $reviewerAModel -ReasoningEffort $reviewerAEffort -Prompt $blindPrompt -RunDirectory $runDirectory -RunnerRoot $RunnerRoot -InputRoot $inputRoot -ProviderCommand $manifest.providers.reviewerA.commandPath -TimeoutSeconds $RoleTimeoutSeconds -Receipts $receipts
-        $reviewerB=Invoke-ContractReviewRole -Adapter $CodexAdapter -Role blind-reviewer -ArtifactName reviewer-b -Provider codex -Model $CodexModel -ReasoningEffort $CodexReasoningEffort -Prompt $blindPrompt -RunDirectory $runDirectory -RunnerRoot $RunnerRoot -InputRoot $inputRoot -ProviderCommand $manifest.providers.reviewerB.commandPath -TimeoutSeconds $RoleTimeoutSeconds -Receipts $receipts
+        $blindReviews=Invoke-ContractReviewParallelRoles -ReviewerAParameters @{
+            Adapter=$reviewerAAdapter;Role='blind-reviewer';ArtifactName='reviewer-a';Provider=$reviewerAProvider;Model=$reviewerAModel;ReasoningEffort=$reviewerAEffort
+            Prompt=$blindPrompt;RunDirectory=$runDirectory;RunnerRoot=$RunnerRoot;InputRoot=$inputRoot;ProviderCommand=$manifest.providers.reviewerA.commandPath;TimeoutSeconds=$RoleTimeoutSeconds
+        } -ReviewerBParameters @{
+            Adapter=$CodexAdapter;Role='blind-reviewer';ArtifactName='reviewer-b';Provider='codex';Model=$CodexModel;ReasoningEffort=$CodexReasoningEffort
+            Prompt=$blindPrompt;RunDirectory=$runDirectory;RunnerRoot=$RunnerRoot;InputRoot=$inputRoot;ProviderCommand=$manifest.providers.reviewerB.commandPath;TimeoutSeconds=$RoleTimeoutSeconds
+        } -Receipts $receipts
+        $reviewerA=$blindReviews.ReviewerA
+        $reviewerB=$blindReviews.ReviewerB
         $comparisonPayload=[ordered]@{ reviewerA=$reviewerA; reviewerB=$reviewerB; reviewContext=$basePayload }
         $comparison=Invoke-ContractReviewRole -Adapter $CodexAdapter -Role comparator -ArtifactName comparison -Provider codex -Model $CodexModel -ReasoningEffort $CodexReasoningEffort -Prompt (New-ContractReviewPrompt -Role comparator -Request $request -InputBundle $inputBundle -Payload $comparisonPayload) -RunDirectory $runDirectory -RunnerRoot $RunnerRoot -InputRoot $inputRoot -ProviderCommand $manifest.providers.comparator.commandPath -TimeoutSeconds $RoleTimeoutSeconds -Receipts $receipts
         Assert-ContractReviewComparisonAccounting -ReviewerA $reviewerA -ReviewerB $reviewerB -Comparison $comparison

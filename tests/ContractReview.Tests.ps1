@@ -116,6 +116,19 @@ try{
     Assert-That ((Git @('status','--porcelain'))-eq'') 'Target became dirty.'
     $markdown=Get-Content $default.PacketPath -Raw;Assert-That ($markdown-match'## unresolved'-and$markdown-match'## reviewerA') 'Human Markdown packet is incomplete.'
     foreach($property in $default.Packet.artifactHashes.PSObject.Properties){Assert-That ((Get-FileHash (Join-Path $default.RunDirectory $property.Name)).Hash.ToLowerInvariant()-eq[string]$property.Value) "Artifact hash mismatch: $($property.Name)"}
+    $concurrent=Invoke-FakeRun 'fixture-concurrent-blind-001' 'REQUIRE_CONCURRENT_BLIND'
+    Assert-That ($concurrent.Packet.status-eq'USER_DECISION_REQUIRED') "Concurrent blind-review fixture ended with status $($concurrent.Packet.status)."
+    $concurrentA=Get-Content (Join-Path $concurrent.RunDirectory 'reviewer-a.invocation.json') -Raw|ConvertFrom-Json
+    $concurrentB=Get-Content (Join-Path $concurrent.RunDirectory 'reviewer-b.invocation.json') -Raw|ConvertFrom-Json
+    $blindStartDelta=([DateTime]::Parse([string]$concurrentA.adapterProcessStartTimeUtc)-[DateTime]::Parse([string]$concurrentB.adapterProcessStartTimeUtc)).Duration().TotalSeconds
+    Assert-That ($blindStartDelta-lt5) "Blind reviewer starts were $blindStartDelta second(s) apart."
+    $peerBlocked=Invoke-FakeRun 'fixture-peer-stop-001' 'REVIEWER_A_BLOCKER'
+    Assert-That ($peerBlocked.Packet.status-eq'BLOCKED_RULES_OR_SETTINGS') "Reviewer A blocker was not retained: $($peerBlocked.Packet.blocker)"
+    $peerInvocation=Get-Content (Join-Path $peerBlocked.RunDirectory 'reviewer-b.invocation.json') -Raw|ConvertFrom-Json
+    Assert-That (-not(Get-Process -Id ([int]$peerInvocation.adapterProcessId) -ErrorAction SilentlyContinue)) 'Blocked blind review left its peer adapter alive.'
+    $peerChild=Get-Content (Join-Path $peerBlocked.RunDirectory 'reviewer-b-peer-child.json') -Raw|ConvertFrom-Json
+    Assert-That (-not(Get-Process -Id ([int]$peerChild.childProcessId) -ErrorAction SilentlyContinue)) 'Blocked blind review left its peer provider child alive.'
+    Assert-That (-not(Test-Path (Join-Path $peerBlocked.RunDirectory 'comparison.invocation.json'))) 'Comparator started after a blind reviewer blocker.'
     $replay=$false;try{Start-ContractReview -RequestPath $default.Request -RunnerRoot $runnerRoot -ClaudeAdapter $fake -CodexAdapter $fake -ClaudeModel 'claude-fable-5' -CodexModel 'gpt-5.6-sol' -CodexReasoningEffort max -RoleTimeoutSeconds 20 -GitTimeoutSeconds 20 -SplitterTimeoutSeconds 20 -Approval $default.Approval|Out-Null}catch{$replay=$_.Exception.Message-match'already been consumed'};Assert-That $replay 'Approval replay was accepted.'
     $changed=Get-ContractReviewApproval -RequestPath $default.Request -RunnerRoot $runnerRoot -ClaudeAdapter $fake -CodexAdapter $fake -ClaudeModel 'claude-fable-5' -CodexModel 'gpt-5.6-sol' -CodexReasoningEffort max -RoleTimeoutSeconds 21 -GitTimeoutSeconds 20 -SplitterTimeoutSeconds 20
     Assert-That ($changed-ne$default.Approval) 'Timeout change did not invalidate execution approval.'
@@ -133,8 +146,11 @@ try{
     $blocked=Invoke-FakeRun 'fixture-blocker-001' 'BLOCKER';Assert-That ($blocked.Packet.status-eq'BLOCKED_RULES_OR_SETTINGS') 'Rules/settings blocker did not stop distinctly.'
     $providerBlocked=Invoke-FakeRun 'fixture-provider-config-blocker-001' '' 'decision' (Join-Path $runnerRoot 'tests\fixtures\Fake-ProviderConfigFailure.ps1')
     Assert-That ($providerBlocked.Packet.status-eq'BLOCKED_RULES_OR_SETTINGS'-and$providerBlocked.Packet.blocker-match'provider configuration') 'Provider configuration rejection was not reported as a rules/settings blocker.'
-    Assert-That (@($providerBlocked.Packet.receipts)-contains'reviewer-a.stderr.log') 'Provider configuration blocker omitted its stderr receipt.'
-    Assert-That (-not(Test-Path (Join-Path $providerBlocked.RunDirectory 'reviewer-b.invocation.json'))) 'Provider configuration blocker continued to reviewer B.'
+    $providerStderr=@($providerBlocked.Packet.receipts|Where-Object{$_-match'^reviewer-[ab]\.stderr\.log$'})
+    Assert-That ($providerStderr.Count-ge1) 'Provider configuration blocker omitted both blind-provider stderr receipts.'
+    $providerInvocations=@('reviewer-a','reviewer-b'|ForEach-Object{Get-Content (Join-Path $providerBlocked.RunDirectory "$_.invocation.json") -Raw|ConvertFrom-Json})
+    foreach($providerInvocation in $providerInvocations){Assert-That (-not(Get-Process -Id ([int]$providerInvocation.adapterProcessId) -ErrorAction SilentlyContinue)) 'Provider configuration blocker left a blind adapter alive.'}
+    Assert-That (-not(Test-Path (Join-Path $providerBlocked.RunDirectory 'comparison.invocation.json'))) 'Provider configuration blocker continued to comparison.'
     Assert-That (-not(Test-Path (Join-Path $providerBlocked.RunDirectory 'worktree'))) 'Provider configuration blocker left its disposable worktree.'
     $authBlocked=Invoke-FakeRun 'fixture-provider-auth-blocker-001' '' 'decision' (Join-Path $runnerRoot 'tests\fixtures\Fake-ProviderAuthFailure.ps1')
     Assert-That ($authBlocked.Packet.status-eq'BLOCKED_RULES_OR_SETTINGS'-and$authBlocked.Packet.blocker-match'provider authentication') 'Late provider authentication rejection was not retained as a rules/settings blocker.'
@@ -165,6 +181,15 @@ try{
     Write-Json (Join-Path $pidReuseRun 'execution-manifest.json') ([ordered]@{requestId='fixture-pid-reuse';targetRepository=$target;targetRevision=(Git @('rev-parse','HEAD'))})
     Write-Json (Join-Path $pidReuseRun 'live.invocation.json') ([ordered]@{adapterProcessId=$PID;adapterProcessStartTimeUtc=(Get-Process -Id $PID).StartTime.ToUniversalTime().AddSeconds(-1).ToString('o')})
     $pidSafe=$false;try{Repair-InterruptedContractReview -RunDirectory $pidReuseRun -RunnerRoot $runnerRoot -Reason 'pid test' -GitTimeoutSeconds 20|Out-Null}catch{$pidSafe=$_.Exception.Message-match'reused PID'};Assert-That $pidSafe 'Recovery did not reject a mismatched PID identity.';Assert-That ([bool](Get-Process -Id $PID -ErrorAction SilentlyContinue)) 'Recovery terminated the test process.'
+    $exactPidRun=Join-Path $runnerRoot 'runs\fixture-exact-pid-recovery';New-Item -ItemType Directory -Path $exactPidRun|Out-Null
+    Write-Json (Join-Path $exactPidRun 'execution-manifest.json') ([ordered]@{requestId='fixture-exact-pid-recovery';targetRepository=$target;targetRevision=(Git @('rev-parse','HEAD'))})
+    $exactPidProcess=Start-Process -FilePath (Get-Command pwsh.exe).Path -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 300') -PassThru
+    try{
+        Write-Json (Join-Path $exactPidRun 'live.invocation.json') ([ordered]@{adapterProcessId=$exactPidProcess.Id;adapterProcessStartTimeUtc=$exactPidProcess.StartTime.ToUniversalTime().ToString('o')})
+        $exactRecovered=Repair-InterruptedContractReview -RunDirectory $exactPidRun -RunnerRoot $runnerRoot -Reason 'exact pid test' -GitTimeoutSeconds 20
+        Assert-That (Test-Path $exactRecovered) 'Exact-PID recovery packet was not written.'
+        Assert-That (-not(Get-Process -Id $exactPidProcess.Id -ErrorAction SilentlyContinue)) 'Recovery did not terminate the exact recorded adapter process.'
+    }finally{if(Get-Process -Id $exactPidProcess.Id -ErrorAction SilentlyContinue){Stop-Process -Id $exactPidProcess.Id -Force}}
     $recoveryRun=Join-Path $runnerRoot 'runs\fixture-recovery';New-Item -ItemType Directory -Path $recoveryRun|Out-Null
     Write-Json (Join-Path $recoveryRun 'execution-manifest.json') ([ordered]@{requestId='fixture-recovery';targetRepository=$target;targetRevision=(Git @('rev-parse','HEAD'))})
     Git @('worktree','add','--detach',(Join-Path $recoveryRun 'worktree'),'HEAD')|Out-Null

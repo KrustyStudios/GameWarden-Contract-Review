@@ -10,7 +10,7 @@ This repository contains only the runner, schemas, generic examples, and fake-pr
 
 ## Locked flow
 
-1. One fresh Claude CLI and one fresh Codex CLI receive the same byte-identical blind-review prompt. `-AllCodex` substitutes a second fresh Codex CLI for Claude.
+1. One fresh Claude CLI and one fresh Codex CLI run at the same time with the same byte-identical blind-review prompt. `-AllCodex` substitutes a second fresh Codex CLI for Claude. Comparison waits for both; if either blind role fails or blocks, the coordinator stops the verified peer process tree and does not start comparison.
 2. A fresh Codex comparator accounts for every finding as `AGREED`, `RESOLVED_BY_READING`, `ONE_SIDED`, `NEEDS_PROOF`, or `USER_DECISION`.
 3. Each original reviewer receives the `NEEDS_PROOF` set and only its own findings, then proves, qualifies, withdraws, or exposes a user choice.
 4. A fresh Codex validator receives both initial reviews, every classification, and both proof responses. The coordinator rejects missing, duplicate, or unknown references mechanically.

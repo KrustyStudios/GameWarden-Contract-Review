@@ -15,6 +15,20 @@ function Evidence {
 }
 function Finding([string]$Id,[string]$Claim){[ordered]@{id=$Id;claim=$Claim;evidence=Evidence;classification='fact';placement=[ordered]@{disposition='MOVE';destinations=@('sample-owner');existingTag='[sample]';proposedTags=@('[sample]');rationale='Generic ownership.'}}}
 $scenario=$env:CONTRACT_REVIEW_TEST_SCENARIO;$artifact=$env:CONTRACT_REVIEW_ARTIFACT_NAME;$role=$env:CONTRACT_REVIEW_ROLE;$response=New-Envelope
+$runDirectory=Split-Path -Parent $env:CONTRACT_REVIEW_OUTPUT_PATH
+if($role-eq'blind-reviewer'-and$scenario-in@('REQUIRE_CONCURRENT_BLIND','REVIEWER_A_BLOCKER')){
+    $peer=if($artifact-eq'reviewer-a'){'reviewer-b'}else{'reviewer-a'}
+    [IO.File]::WriteAllText((Join-Path $runDirectory "$artifact.concurrent-ready"),'ready',[Text.UTF8Encoding]::new($false))
+    $deadline=[DateTime]::UtcNow.AddSeconds(5)
+    while(-not(Test-Path -LiteralPath (Join-Path $runDirectory "$peer.concurrent-ready"))-and[DateTime]::UtcNow-lt$deadline){Start-Sleep -Milliseconds 50}
+    if(-not(Test-Path -LiteralPath (Join-Path $runDirectory "$peer.concurrent-ready"))){throw "Blind reviewer peer '$peer' did not start concurrently."}
+    if($scenario-eq'REVIEWER_A_BLOCKER'){
+        if($artifact-eq'reviewer-a'){$response.status='blocker';$response.reason='Pinned review rules conflict.';$response|ConvertTo-Json -Depth 20|Set-Content $env:CONTRACT_REVIEW_OUTPUT_PATH -Encoding utf8;exit 0}
+        $peerChild=Start-Process -FilePath (Get-Command pwsh.exe).Path -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 300') -PassThru
+        [ordered]@{childProcessId=$peerChild.Id}|ConvertTo-Json|Set-Content (Join-Path $runDirectory 'reviewer-b-peer-child.json') -Encoding utf8
+        Start-Sleep -Seconds 60
+    }
+}
 $roleSchema=Get-Content $env:CONTRACT_REVIEW_SCHEMA_PATH -Raw|ConvertFrom-Json
 if($scenario -eq 'BLOCKER'){$response.status='blocker';$response.reason='Pinned review rules conflict.';$response|ConvertTo-Json -Depth 20|Set-Content $env:CONTRACT_REVIEW_OUTPUT_PATH -Encoding utf8;exit 0}
 switch($role){

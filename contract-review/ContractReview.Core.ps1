@@ -86,6 +86,37 @@ function Select-ContractReviewProviderCommand {
     throw "No runnable $Provider CLI command could be resolved from $($seen.Count) existing candidate(s)."
 }
 
+function Get-ContractReviewRecordedProcess {
+    param([Parameter(Mandatory = $true)][string]$InvocationPath)
+    $invocation = Read-ContractReviewJson -Path $InvocationPath -Label 'invocation receipt'
+    $processId = [int]$invocation.adapterProcessId
+    if ($processId -le 0) { return $null }
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if (-not $process) { return $null }
+    $recordedText = [string]$invocation.adapterProcessStartTimeUtc
+    if ([string]::IsNullOrWhiteSpace($recordedText)) {
+        throw "Live PID $processId has no recorded start time; refusing unsafe process termination."
+    }
+    try {
+        $recorded = ([DateTime]::Parse($recordedText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToUniversalTime()
+    } catch {
+        throw "Live PID $processId has an invalid recorded start time; refusing unsafe process termination."
+    }
+    if ($process.StartTime.ToUniversalTime().Ticks -ne $recorded.Ticks) {
+        throw "Live PID $processId no longer matches its invocation receipt; refusing to terminate a reused PID."
+    }
+    return $process
+}
+
+function Stop-ContractReviewRecordedProcessTree {
+    param([Parameter(Mandatory = $true)][string]$InvocationPath)
+    $process = Get-ContractReviewRecordedProcess -InvocationPath $InvocationPath
+    if (-not $process) { return $null }
+    $processId = $process.Id
+    Stop-ContractReviewProcessTree -ProcessId $processId
+    return $processId
+}
+
 function Resolve-ContractReviewProviderCommand {
     param([Parameter(Mandatory = $true)][ValidateSet('claude','codex')][string]$Provider)
     $overrideName = if ($Provider -eq 'claude') { 'CONTRACT_REVIEW_CLAUDE_COMMAND' } else { 'CONTRACT_REVIEW_CODEX_COMMAND' }
