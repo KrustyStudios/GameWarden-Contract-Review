@@ -1,0 +1,16 @@
+{
+  "requestId": "sample-placement-001",
+  "ticketId": "gw-example",
+  "targetRepository": "C:\\projects\\sample-application",
+  "reviewKind": "decision",
+  "reviewSubject": "Shared capability ownership",
+  "neutralQuestion": "Which existing contract should own the shared capability rule, and what evidence supports that placement?",
+  "sources": [
+    "contracts/CAPABILITY_CONTRACT.md",
+    "contracts/IMPLEMENTATION_CONTRACT.md"
+  ],
+  "stage1": {
+    "enabled": false,
+    "sourceContract": null
+  }
+}

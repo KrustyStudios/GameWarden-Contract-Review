@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Approved contract review execution manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocolVersion", "requestId", "requestSha256", "targetRepository", "targetRevision", "pinnedObjects", "runnerFiles", "reviewMode", "providers", "timeouts", "cleanup"],
+  "properties": {
+    "protocolVersion": { "const": 2 },
+    "requestId": { "type": "string", "minLength": 1 },
+    "requestSha256": { "$ref": "#/$defs/sha256" },
+    "targetRepository": { "type": "string", "minLength": 1 },
+    "targetRevision": { "type": "string", "pattern": "^[a-f0-9]{40,64}$" },
+    "pinnedObjects": { "type": "object", "minProperties": 1, "additionalProperties": { "type": "string", "pattern": "^[a-f0-9]{40,64}$" } },
+    "runnerFiles": { "type": "object", "minProperties": 1, "additionalProperties": { "$ref": "#/$defs/sha256" } },
+    "reviewMode": { "enum": ["claude-codex", "all-codex"] },
+    "providers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reviewerA", "reviewerB", "comparator", "reviewerAProof", "reviewerBProof", "validator"],
+      "properties": {
+        "reviewerA": { "$ref": "#/$defs/provider" },
+        "reviewerB": { "$ref": "#/$defs/provider" },
+        "comparator": { "$ref": "#/$defs/provider" },
+        "reviewerAProof": { "$ref": "#/$defs/provider" },
+        "reviewerBProof": { "$ref": "#/$defs/provider" },
+        "validator": { "$ref": "#/$defs/provider" }
+      }
+    },
+    "timeouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["roleSeconds", "gitSeconds", "splitterSeconds"],
+      "properties": {
+        "roleSeconds": { "type": "integer", "minimum": 1 },
+        "gitSeconds": { "type": "integer", "minimum": 1 },
+        "splitterSeconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["keepWorktree", "killFullProcessTree", "cleanupFailureIsTerminal", "automaticRetry"],
+      "properties": {
+        "keepWorktree": { "const": false },
+        "killFullProcessTree": { "const": true },
+        "cleanupFailureIsTerminal": { "const": true },
+        "automaticRetry": { "const": false }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model", "reasoningEffort", "commandPath", "commandSha256"],
+      "properties": {
+        "provider": { "enum": ["claude", "codex"] },
+        "model": { "type": "string", "minLength": 1 },
+        "reasoningEffort": { "type": ["string", "null"] },
+        "commandPath": { "type": "string", "minLength": 1 },
+        "commandSha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

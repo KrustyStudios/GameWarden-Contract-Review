@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Human contract apply decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runId", "approvedResolutionIds", "deniedResolutionIds", "decidedBy", "decidedUtc"],
+  "properties": {
+    "runId": { "type": "string" },
+    "approvedResolutionIds": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+    "deniedResolutionIds": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+    "decidedBy": { "type": "string", "minLength": 1 },
+    "decidedUtc": { "type": "string", "format": "date-time" }
+  }
+}

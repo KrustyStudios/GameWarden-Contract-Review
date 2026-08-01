@@ -1,0 +1,30 @@
+# Runtime state / logs — churn every turn, not worth versioning
+*.log
+*.log.prev
+*.bak
+*.tmp
+baton.md
+loop.state
+NEEDS-ATTENTION.txt
+
+# AI tooling scratch state
+.agents/
+.codex/
+
+# Isolated contract-review run artifacts and one-time approval receipts
+runs/
+approval-receipts/
+requests/
+launcher-receipts/
+
+# Local credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+credentials*.json
+
+# Human decisions are local review inputs
+human-decision*.json
