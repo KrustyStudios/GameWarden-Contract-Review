@@ -2,7 +2,7 @@
 
 `Start-ContractReview.ps1` is the read-only decision loop. It never edits a contract and it never reads a ticket body.
 
-> **Development status:** Pre-release and fail-closed. Hermetic tests pass, but real-provider validation is still in progress. The current evidence validator requires excerpts to be exact source substrings; provider instructions are being hardened so Markdown wrapping or ellipses cannot produce an avoidable validation failure.
+> **Development status:** Pre-release and fail-closed. Hermetic tests pass, but real-provider validation is still in progress. Evidence excerpts must copy one contiguous source passage; Markdown line wrapping may differ, while omitted or paraphrased content remains invalid.
 
 ## Public-repository boundary
 
@@ -32,7 +32,7 @@ The contract epic has precedence for review-protocol conflicts. Contracts remain
 - Each role and Git/splitter operation is bounded. Timeout kills the adapter/provider process tree and treats a partial Windows tree-kill as failure.
 - A provider bootstrap rejection caused by invalid isolation configuration stops as `BLOCKED_RULES_OR_SETTINGS`, retains its invocation and stderr receipts, and does not continue to another role.
 - If a provider rejects authentication after the final readiness check, the adapter records a provider-authentication blocker and the coordinator stops as `BLOCKED_RULES_OR_SETTINGS` with its receipts.
-- Every evidence excerpt must occur verbatim in the cited immutable input. Proofs must name every finding on that side of a disputed classification, and resolution outcomes mechanically determine the exact accepted finding IDs.
+- Every evidence excerpt must copy one contiguous passage from the cited immutable input. Markdown line wrapping may differ, but every non-whitespace character and its order must match; paraphrases, reordered text, joined passages, and omission ellipses fail. Proofs must name every finding on that side of a disputed classification, and resolution outcomes mechanically determine the exact accepted finding IDs.
 - Worktree removal and target verification happen before the final packet. Cleanup failure is terminal.
 
 ## Request and run

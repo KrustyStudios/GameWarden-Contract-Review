@@ -52,8 +52,11 @@ try{
     $blindSchema=Get-Content $blindSchemaPath -Raw|ConvertFrom-Json;$validatorSchema=Get-Content $validatorSchemaPath -Raw|ConvertFrom-Json
     Assert-That ($blindSchema.properties.stage1Manifest.maxItems-eq0-and$blindSchema.properties.classifications.maxItems-eq0) 'Blind schema did not mechanically forbid role-inappropriate arrays.'
     Assert-That ($validatorSchema.properties.stage1Manifest.PSObject.Properties.Name-notcontains'maxItems'-and$validatorSchema.properties.findings.maxItems-eq0) 'Validator schema did not allow only validator-owned arrays.'
+    $evidenceRequirement=Get-ContractReviewEvidenceRequirement
+    Assert-That ([string]$blindSchema.definitions.evidence.properties.excerpt.description-ceq$evidenceRequirement) 'Provider schema omitted the canonical evidence-excerpt contract.'
     $rolePrompt=New-ContractReviewPrompt -Role blind-reviewer -Request ([pscustomobject]@{reviewSubject='subject';neutralQuestion='question'}) -InputBundle 'input' -Payload $null
     Assert-That ($rolePrompt-match'Only these response arrays may be non-empty for blind-reviewer: findings\.') 'Blind prompt omitted its explicit role-field contract.'
+    Assert-That ($rolePrompt.Contains($evidenceRequirement)) 'Blind prompt omitted the canonical evidence-excerpt contract.'
     New-Item -ItemType Directory -Path (Join-Path $target 'contracts'),(Join-Path $target '.design'),(Join-Path $target 'tools\ai')|Out-Null
     [IO.File]::WriteAllText((Join-Path $target 'contracts\sample.md'),"# Sample`n`nA generic rule.",[Text.UTF8Encoding]::new($false))
     Set-Content (Join-Path $target 'AI_RULES.md') 'Rules apply. The epic governs review protocol.' -Encoding utf8
@@ -116,7 +119,8 @@ try{
     Assert-That ($allCodexPacket.status-eq'USER_DECISION_REQUIRED'-and@($allCodexExecution.providers.PSObject.Properties.Value.provider|Where-Object{$_-ne'codex'}).Count-eq0) 'All-Codex mode did not bind every role to Codex.'
     $env:CONTRACT_REVIEW_CLAUDE_COMMAND=$env:CONTRACT_REVIEW_CODEX_COMMAND
 
-    foreach($case in @(@('OMIT_FINDING','omitted'),@('UNKNOWN_REF','unknown'),@('PROOF_GAP','proof IDs'),@('PROOF_FINDING_GAP','every finding'),@('RESOLUTION_GAP','resolve every'),@('WRONG_RESOLUTION_FINDING','acceptedFindingIds'),@('BAD_EVIDENCE','does not occur verbatim'),@('ROLE_LEAK','role-inappropriate'))){$run=Invoke-FakeRun ("fixture-{0}-001"-f$case[0].ToLower()) $case[0];Assert-That ($run.Packet.status-eq'FAILED') "$($case[0]) did not fail";Assert-That ($run.Packet.blocker-match$case[1]) "$($case[0]) failure was not explicit: $($run.Packet.blocker)"}
+    $wrappedEvidence=Invoke-FakeRun 'fixture-wrapped-evidence-001' 'WRAPPED_EVIDENCE';Assert-That ($wrappedEvidence.Packet.status-eq'USER_DECISION_REQUIRED') 'Whitespace-only Markdown wrapping invalidated contiguous source evidence.'
+    foreach($case in @(@('OMIT_FINDING','omitted'),@('UNKNOWN_REF','unknown'),@('PROOF_GAP','proof IDs'),@('PROOF_FINDING_GAP','every finding'),@('RESOLUTION_GAP','resolve every'),@('WRONG_RESOLUTION_FINDING','acceptedFindingIds'),@('BAD_EVIDENCE','contiguous source passage'),@('ELLIPSIS_EVIDENCE','contiguous source passage'),@('ROLE_LEAK','role-inappropriate'))){$run=Invoke-FakeRun ("fixture-{0}-001"-f$case[0].ToLower()) $case[0];Assert-That ($run.Packet.status-eq'FAILED') "$($case[0]) did not fail";Assert-That ($run.Packet.blocker-match$case[1]) "$($case[0]) failure was not explicit: $($run.Packet.blocker)"}
     $blocked=Invoke-FakeRun 'fixture-blocker-001' 'BLOCKER';Assert-That ($blocked.Packet.status-eq'BLOCKED_RULES_OR_SETTINGS') 'Rules/settings blocker did not stop distinctly.'
     $providerBlocked=Invoke-FakeRun 'fixture-provider-config-blocker-001' '' 'decision' (Join-Path $runnerRoot 'tests\fixtures\Fake-ProviderConfigFailure.ps1')
     Assert-That ($providerBlocked.Packet.status-eq'BLOCKED_RULES_OR_SETTINGS'-and$providerBlocked.Packet.blocker-match'provider configuration') 'Provider configuration rejection was not reported as a rules/settings blocker.'

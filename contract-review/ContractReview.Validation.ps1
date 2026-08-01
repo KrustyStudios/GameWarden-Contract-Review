@@ -14,6 +14,10 @@ function Get-ContractReviewRoleAllowedFields {
     }
 }
 
+function Get-ContractReviewEvidenceRequirement {
+    return 'Copy one contiguous passage from the cited immutable input. Whitespace-only differences caused by line wrapping are allowed; every non-whitespace character and its order must match. Do not paraphrase, reorder text, join separate passages, or use an ellipsis to omit text.'
+}
+
 function New-ContractReviewRoleSchema {
     param(
         [Parameter(Mandatory = $true)][string]$BaseSchemaPath,
@@ -21,6 +25,8 @@ function New-ContractReviewRoleSchema {
         [Parameter(Mandatory = $true)][string]$Path
     )
     $schema = Read-ContractReviewJson -Path $BaseSchemaPath -Label 'base agent response schema'
+    if ($null -eq $schema.definitions.evidence.properties.excerpt) { throw 'Base response schema is missing the evidence excerpt definition.' }
+    $schema.definitions.evidence.properties.excerpt | Add-Member -NotePropertyName description -NotePropertyValue (Get-ContractReviewEvidenceRequirement) -Force
     $allowed = @(Get-ContractReviewRoleAllowedFields -Role $Role)
     foreach ($field in $script:ContractReviewResponseArrays) {
         if ($schema.properties.PSObject.Properties.Name -notcontains $field) { throw "Base response schema is missing '$field'." }
@@ -136,7 +142,7 @@ function New-ContractReviewPrompt {
         'The contract epic governs this review protocol when review rules conflict. The contracts govern application behavior.',
         'Return only the schema-constrained JSON envelope. Use status blocker with a precise reason and empty arrays if rules or settings conflict.',
         "Only these response arrays may be non-empty for ${Role}: $([string]::Join(', ', $allowedFields)). All other response arrays must be empty.",
-        'Evidence must name an immutable input, a human-readable locator, and a short excerpt. A MOVE preserves original rule bytes and its current tag. A tag change is separate metadata, never hidden in a move.',
+        "Evidence excerpt contract: $(Get-ContractReviewEvidenceRequirement) Evidence must also name the immutable input and a human-readable locator. A MOVE preserves original rule bytes and its current tag. A tag change is separate metadata, never hidden in a move.",
         '',
         'ROLE PAYLOAD:',
         $payloadText,
@@ -158,6 +164,18 @@ function Assert-ContractReviewEvidence {
     }
 }
 
+function ConvertTo-ContractReviewComparableEvidenceText {
+    param([AllowEmptyString()][string]$Text)
+    return ([regex]::Replace($Text, '\s+', ' ')).Trim()
+}
+
+function Test-ContractReviewEvidenceExcerpt {
+    param([string]$SourceText, [string]$Excerpt)
+    $comparableSource = ConvertTo-ContractReviewComparableEvidenceText -Text $SourceText
+    $comparableExcerpt = ConvertTo-ContractReviewComparableEvidenceText -Text $Excerpt
+    return $comparableExcerpt.Length -gt 0 -and $comparableSource.IndexOf($comparableExcerpt, [StringComparison]::Ordinal) -ge 0
+}
+
 function Assert-ContractReviewResponseEvidence {
     param([object]$Response, [string]$Role, [string]$InputRoot)
     $groups = switch ($Role) {
@@ -174,8 +192,8 @@ function Assert-ContractReviewResponseEvidence {
                 throw "Agent $Role cited an input that was not supplied: $($item.source)"
             }
             $text = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $path), [Text.UTF8Encoding]::new($false, $true))
-            if ($text.IndexOf([string]$item.excerpt, [StringComparison]::Ordinal) -lt 0) {
-                throw "Agent $Role evidence excerpt does not occur verbatim in $($item.source)."
+            if (-not (Test-ContractReviewEvidenceExcerpt -SourceText $text -Excerpt ([string]$item.excerpt))) {
+                throw "Agent $Role evidence excerpt is not one contiguous source passage after whitespace-only normalization in $($item.source)."
             }
         }
     }

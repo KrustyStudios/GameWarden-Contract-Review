@@ -4,7 +4,15 @@ $prompt=[IO.File]::ReadAllText($env:CONTRACT_REVIEW_PROMPT_FILE)
 if($prompt -match '(?i)gw-hidden|ticketId|APPROVE CONTRACT REVIEW'){throw 'ticket firewall failed: protected coordinator data reached an agent prompt'}
 foreach($character in $prompt.ToCharArray()){if([int]$character -lt 32 -and $character -notin @("`r","`n","`t")){throw 'prompt contains a forbidden control character'}}
 function New-Envelope { [ordered]@{status='ok';reason=$null;findings=@();classifications=@();proofs=@();resolutions=@();unresolved=@();stage1Manifest=@()} }
-function Evidence { @([ordered]@{source='contracts/sample.md';locator='rule paragraph';excerpt=$(if($env:CONTRACT_REVIEW_TEST_SCENARIO-eq'BAD_EVIDENCE'){'Invented source text.'}else{'A generic rule.'})}) }
+function Evidence {
+    $excerpt=switch($env:CONTRACT_REVIEW_TEST_SCENARIO){
+        'BAD_EVIDENCE'{'Invented source text.'}
+        'ELLIPSIS_EVIDENCE'{'A ... rule.'}
+        'WRAPPED_EVIDENCE'{"A generic`r`nrule."}
+        default{'A generic rule.'}
+    }
+    @([ordered]@{source='contracts/sample.md';locator='rule paragraph';excerpt=$excerpt})
+}
 function Finding([string]$Id,[string]$Claim){[ordered]@{id=$Id;claim=$Claim;evidence=Evidence;classification='fact';placement=[ordered]@{disposition='MOVE';destinations=@('sample-owner');existingTag='[sample]';proposedTags=@('[sample]');rationale='Generic ownership.'}}}
 $scenario=$env:CONTRACT_REVIEW_TEST_SCENARIO;$artifact=$env:CONTRACT_REVIEW_ARTIFACT_NAME;$role=$env:CONTRACT_REVIEW_ROLE;$response=New-Envelope
 $roleSchema=Get-Content $env:CONTRACT_REVIEW_SCHEMA_PATH -Raw|ConvertFrom-Json
