@@ -120,7 +120,7 @@ foreach ($workflowPath in $workflowPaths) {
 }
 
 $gitignore = Get-Content -LiteralPath (Join-Path $repoRoot '.gitignore')
-foreach ($requiredIgnore in @('.env', '.env.*', '*.key', '*.pem', '*.pfx', 'runs/', 'approval-receipts/', 'requests/', 'launcher-receipts/')) {
+foreach ($requiredIgnore in @('.env', '.env.*', '*.key', '*.pem', '*.pfx', 'runs/')) {
     if ($requiredIgnore -notin $gitignore) {
         Add-PublicRepositoryFailure "Required ignore rule is missing: $requiredIgnore"
     }

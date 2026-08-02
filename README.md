@@ -1,102 +1,85 @@
-# Isolated contract-review runner
+# GameWarden Contract Review
 
-`Start-ContractReview.ps1` is the read-only decision loop. It never edits a contract and it never reads a ticket body.
+A small, read-only loop for independent contract review:
 
-> **Development status:** Pre-release and fail-closed. Hermetic tests pass, while live-provider validation is still in progress. Review failures retain their receipts and require a fresh request ID; runs are never silently retried.
+- one guidance file;
+- one source contract;
+- one watcher;
+- two blind CLI reviewers;
+- one Codex comparator and final validator.
 
-## Public-repository boundary
+The watcher accepts no ticket and no free-form brief. Both blind reviewers receive
+byte-identical copies of the guide, source, and prompt in separate private directories.
+Their reports are withheld until both finish successfully.
 
-This repository contains only the runner, schemas, generic examples, and fake-provider tests. Review requests, prompts, responses, receipts, run directories, target repositories, credentials, provider settings, and local handoff notes are runtime/private data and must not be committed.
+## Requirements
 
-Public updates use a clean, allowlisted export based on this repository's `main`. Development-checkout history and internal support files are intentionally not connected or merged into this public history.
+- PowerShell 7
+- Claude CLI logged in for normal mode
+- Codex CLI logged in
+- the target repository's approved `tools/ai/split-contract.ps1`
 
-## Locked flow
+Defaults favor review quality: Claude `opus`, Codex `gpt-5.6-sol`, and Codex reasoning
+effort `max`. Use `-AllCodex` to explicitly replace Claude with a second fresh Codex CLI.
+There is no automatic fallback or retry.
 
-1. One fresh Claude CLI and one fresh Codex CLI receive the same byte-identical blind-review prompt and run concurrently. `-AllCodex` substitutes a second fresh Codex CLI for Claude. Each writes into a separate private temporary artifact directory; neither answer appears in the shared run until both reviewer processes have ended. Comparison starts only after both succeed.
-2. A fresh Codex comparator accounts for every finding as `AGREED`, `RESOLVED_BY_READING`, `RESOLVED_BY_JUDGMENT`, `ONE_SIDED`, `NEEDS_PROOF`, or `USER_DECISION`. Judgment resolution is limited to choosing between otherwise compliant replacement-tag names. Each judgment classification covers exactly one existing tag and must preserve identical disposition, destinations, and source fragments apart from the proposed replacement name; other differences are classified separately.
-3. Each original reviewer receives the `NEEDS_PROOF` set and only its own findings, then proves, qualifies, withdraws, or exposes a user choice.
-4. A fresh Codex validator receives both initial reviews, every classification, and both proof responses. Reviewer-local finding IDs are qualified as `A:<id>` and `B:<id>` at this boundary, so equal IDs from separate reviewers remain distinct. The coordinator rejects missing, duplicate, or unknown references mechanically.
-5. The packet is `COMPLETE`, `USER_DECISION_REQUIRED`, `BLOCKED_RULES_OR_SETTINGS`, or `FAILED`. The human decides any unresolved choice.
+## Run
 
-The contract epic has precedence for review-protocol conflicts. Contracts remain authoritative for application behavior.
-
-## Isolation and approval
-
-- `ticketId` is opaque coordinator metadata. It and the approval phrase are excluded from prompts.
-- The request schema accepts only a neutral subject/question and pinned source paths. Prescriptive line ranges, contract filenames or paths, destinations, fixes, or extra fields fail before approval.
-- The approval phrase hashes the full execution manifest: request, target revision and Git objects, governance, runner/adapters/schemas, every role's provider/model/effort, provider executable path and SHA-256, timeouts, review mode, splitter, and cleanup policy.
-- The run recomputes that manifest. Any change requires a new phrase and each phrase is consumed once.
-- Every required provider must report an authenticated session before an approval is printed. The same sanitized, bounded check runs again immediately before the one-time approval is claimed; a failed recheck leaves the phrase unconsumed. Normal mode requires Claude and Codex, while `-AllCodex` requires only Codex.
-- Source and governance text are inlined into each prompt. Every role starts in a fresh empty operating-system temporary working directory that is deleted after the invocation.
-- The two blind reviewers write all role artifacts into separate unadvertised temporary directories. After both reviewer processes have ended, the coordinator stages and publishes both artifact sets into the shared run, then deletes both private directories. A peer-stop or private-directory cleanup failure is terminal.
-- One canonical role-field map drives the visible prompt rule, the provider-facing JSON schema, and post-response validation. Every role receives a retained schema that mechanically sets role-inappropriate arrays to `maxItems: 0`; its artifact name and SHA-256 are recorded in the invocation receipt.
-- Claude uses safe mode, no settings sources, tools, skills, plugins, hooks, Chrome, persistence, or MCP; its strict MCP input is the explicit empty record `{"mcpServers":{}}`. Codex ignores user config and rules, is ephemeral/read-only, and requests that shell, apps, browser/computer use, hooks, memories, plugins, multi-agent, and related execution features be disabled.
-- The adapter environment is allowlisted; provider-facing `CONTRACT_REVIEW_*` paths are removed before each CLI starts.
-- Each role and Git/splitter operation is bounded. Timeout kills the adapter/provider process tree and treats a partial Windows tree-kill as failure.
-- A provider bootstrap rejection caused by invalid isolation configuration stops as `BLOCKED_RULES_OR_SETTINGS`, retains its invocation and stderr receipts, and does not continue to another role.
-- If a provider rejects authentication after the final readiness check, the adapter records a provider-authentication blocker and the coordinator stops as `BLOCKED_RULES_OR_SETTINGS` with its receipts.
-- Every evidence excerpt must match one contiguous cited input passage after whitespace-only normalization. All non-whitespace characters and their order must remain unchanged; paraphrases, reordered text, joined passages, and omission ellipses fail. Every proof position requires at least one cited source passage. Proofs must name every finding on that side of a disputed classification, and resolution outcomes mechanically determine the exact reviewer-qualified accepted finding IDs.
-- Worktree removal and target verification happen before the final packet. Cleanup failure is terminal.
-
-## Request and run
-
-Create a fresh request from `examples/contract-review-request.json`. A normal decision uses:
-
-```json
-"reviewKind": "decision",
-"stage1": { "enabled": false, "sourceContract": null }
-```
-
-The first relocation review of a contract uses `reviewKind: "stage1"`, exactly one `contracts/**/*.md` source, and the same path as `stage1.sourceContract`.
-
-Print the exact review approval:
+First print the approval phrase:
 
 ```powershell
-.\Start-ContractReview.ps1 -RequestPath .\requests\my-review.json -ShowApproval
+./Start-ContractReview.ps1 `
+  -RunId steamcmd-stage1-001 `
+  -GuidePath <path-to-contract-epic.md> `
+  -TargetPath <path-to-source-contract.md> `
+  -SplitterPath <path-to-split-contract.ps1> `
+  -ShowApproval
 ```
 
-After the user directly supplies it, run in the foreground:
+After the human supplies that exact phrase, run the same command with approval:
 
 ```powershell
-.\Start-ContractReview.ps1 -RequestPath .\requests\my-review.json -Approval '<exact phrase>'
+./Start-ContractReview.ps1 `
+  -RunId steamcmd-stage1-001 `
+  -GuidePath <path-to-contract-epic.md> `
+  -TargetPath <path-to-source-contract.md> `
+  -SplitterPath <path-to-split-contract.ps1> `
+  -Approval 'APPROVE CONTRACT REVIEW steamcmd-stage1-001 <hash>'
 ```
 
-The foreground runner prints progress per role and plays status-specific completion sounds unless `-NoSound` is used. There is no background launcher and no automatic retry.
+The hash binds the guide, source, watcher, splitter, routing mode, models, CLI commands,
+and timeout. Any change requires a new phrase. A run ID cannot be reused.
 
-The packet path is printed for every terminal packet. Process exit codes are deterministic: `COMPLETE` is `0`, `FAILED` is `1`, `USER_DECISION_REQUIRED` is `2`, and `BLOCKED_RULES_OR_SETTINGS` is `3`. A failure before a packet exists also exits nonzero.
+## What happens
 
-## Stage 1
+1. Claude and Codex review concurrently and blind. In `-AllCodex` mode, two fresh Codex
+   sessions do this instead.
+2. A fresh Codex compares both reports, including different finding counts and different
+   source splits.
+3. Each original reviewer receives only its own report and the comparator's disputed
+   claims, then proves or withdraws them.
+4. A fresh Codex validates the comparison and proofs.
+5. If the result is complete, the watcher extracts the final Stage 1 manifest and calls
+   the approved splitter first with `-CheckOnly`, then once to create staging files.
 
-Stage 1 is materialized only after exhaustive validation reaches `COMPLETE`. Before either reviewer starts, the exact splitter from the approved target revision must pass a check-only compatibility probe covering repository-relative contract paths, untagged sections, separate `MOVE` rename metadata, and multi-destination `SPLIT` metadata.
+The watcher never edits a contract. Applying an approved result is a separate human-
+authorized workflow owned by the target repository.
 
-Each accepted placement records exact destination-specific source fragments, and every final manifest row cites the accepted finding IDs it implements. The coordinator expands those assignments and rejects a mismatched range, destination, or proposed tag. A `SPLIT` duplicates one complete range only when every byte belongs in every destination; destination-specific subranges require separate non-overlapping `MOVE` rows.
+## Output
 
-The completed manifest passes check-only validation again before materialization. The splitter tiles the source exactly once, rejects unsafe destinations, invalid shapes, duplicate proposed tags, and existing output, and writes each staging file at its repository-relative contract path. Copied source byte slices retain their newline, BOM, and final-newline bytes. Tag changes remain outside copied text as separately reviewable metadata.
+Each run gets one folder under `runs/` containing the two reviews, comparison, proofs,
+final validation, manifest, staging files, splitter logs, and a SHA-256 receipt. Private
+provider directories are always removed.
 
-## Human apply handoff
-
-Review never grants edit authority. After a `COMPLETE` packet, create a human decision JSON matching `schemas/contract-apply-decision.schema.json`, with every resolution ID in exactly one of `approvedResolutionIds` or `deniedResolutionIds`.
-
-```powershell
-Import-Module .\contract-review\ContractApply.psm1 -Force
-Get-ContractApplyApproval -RunDirectory .\runs\<run-id> -DecisionPath .\human-decision.json
-New-ContractApplyAuthorization -RunDirectory .\runs\<run-id> -DecisionPath .\human-decision.json -Approval '<direct user phrase>'
-```
-
-The phrase is `APPROVE CONTRACT APPLY <run-id> <manifest-hash>`. A ticket containing that text is not authority. The module verifies every retained artifact hash, records the approved/denied set, and still does not edit contracts.
-
-## Recovery
-
-Recovery is explicit and verifies the recorded PID plus its process start time before termination, cleans the worktree, verifies the target, then atomically writes a failed packet. The root script is the safe entry point:
-
-```powershell
-.\Recover-InterruptedContractReview.ps1 -RunDirectory .\runs\<run-id> -Reason '<reason>'
-```
+If a provider fails, blocks, or times out, the watcher stops the run, terminates the peer
+process tree, retains the original stderr and exit code, and does not start the next role.
+Inspect the failure, fix its cause, and start a fresh run ID.
 
 ## Test
 
 ```powershell
-pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\ContractReview.Tests.ps1
+pwsh -NoLogo -NoProfile -NonInteractive -File ./tests/ContractReview.Tests.ps1
+pwsh -NoLogo -NoProfile -NonInteractive -File ./tests/PublicRepository.Tests.ps1
 ```
 
-The suite is hermetic and fake-provider-only. It tests adapter structured output, fresh empty provider working directories, canonical-to-provider schema translation, mechanical uniqueness checks, cross-reviewer ID collisions, role-specific prompt/schema/post-validation parity and retained schema hashes, pinned-splitter compatibility before provider startup, completed-manifest check-only validation, destination-fragment accounting, provider readiness and authentication blockers, concurrent Claude+Codex and all-Codex blind roles, withholding both blind answers until both reviewers end, peer cancellation before comparison, ticket firewalling including prescribed contract paths, executable-bound execution manifests, replay, evidence fidelity including mandatory proof citations, exhaustive finding/proof/resolution accounting, Stage 1 gating, apply denial/authorization, process-tree timeout cleanup, exact-PID recovery, artifact hashes, and target cleanliness. It never launches real Claude or Codex.
+Tests use a fake CLI and splitter. They do not launch Claude or Codex.

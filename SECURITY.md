@@ -13,7 +13,7 @@ Use GitHub's private vulnerability reporting form:
 <https://github.com/KrustyStudios/GameWarden-Contract-Review/security/advisories/new>
 
 Do not open a public issue for a suspected vulnerability. Do not include live
-credentials, approval receipts, private contracts, personal paths, or
+credentials, approval phrases, private contracts, personal paths, or
 unredacted run artifacts in a report. If a credential may have been exposed,
 revoke or rotate it immediately and then report the incident.
 
@@ -27,7 +27,7 @@ is available.
 Reports are especially useful for problems involving:
 
 - approval or authorization bypasses;
-- ticket/request influence reaching blind-review prompts;
+- ticket or free-form-brief influence reaching blind-review prompts;
 - provider isolation, authentication, or tool restrictions;
 - command construction or process cleanup;
 - path traversal, symlink, or repository-boundary escapes;
