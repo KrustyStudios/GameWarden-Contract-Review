@@ -1,6 +1,5 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'Fake-IsolationPreflight.ps1')
 $prompt=[IO.File]::ReadAllText($env:CONTRACT_REVIEW_PROMPT_FILE)
 if($prompt -match '(?i)gw-hidden|ticketId|APPROVE CONTRACT REVIEW'){throw 'ticket firewall failed: protected coordinator data reached an agent prompt'}
 foreach($character in $prompt.ToCharArray()){if([int]$character -lt 32 -and $character -notin @("`r","`n","`t")){throw 'prompt contains a forbidden control character'}}
@@ -18,15 +17,16 @@ function Finding([string]$Id,[string]$Claim,[string]$ExistingTag='[sample]',[str
     [ordered]@{id=$Id;claim=$Claim;evidence=Evidence;classification='fact';placement=[ordered]@{disposition='MOVE';destinations=@('contracts/SAMPLE_CONTRACT.md');existingTag=$ExistingTag;proposedTags=@($ProposedTag);fragments=@();rationale='Generic ownership.'}}
 }
 $scenario=$env:CONTRACT_REVIEW_TEST_SCENARIO;$artifact=$env:CONTRACT_REVIEW_ARTIFACT_NAME;$role=$env:CONTRACT_REVIEW_ROLE;$response=New-Envelope
-if(Complete-FakeIsolationPreflight){exit 0}
 $isStage1=$prompt -match '"reviewKind":"stage1"'
 $runDirectory=Split-Path -Parent $env:CONTRACT_REVIEW_OUTPUT_PATH
 if($role-eq'blind-reviewer'-and$scenario-in@('REQUIRE_CONCURRENT_BLIND','REVIEWER_A_BLOCKER')){
+    $coordinationRoot=$env:CONTRACT_REVIEW_TEST_COORDINATION_ROOT
+    if([string]::IsNullOrWhiteSpace($coordinationRoot)){throw 'Blind-review test coordination root was not supplied.'}
     $peer=if($artifact-eq'reviewer-a'){'reviewer-b'}else{'reviewer-a'}
-    [IO.File]::WriteAllText((Join-Path $runDirectory "$artifact.concurrent-ready"),'ready',[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $coordinationRoot "$artifact.concurrent-ready"),'ready',[Text.UTF8Encoding]::new($false))
     $deadline=[DateTime]::UtcNow.AddSeconds(5)
-    while(-not(Test-Path -LiteralPath (Join-Path $runDirectory "$peer.concurrent-ready"))-and[DateTime]::UtcNow-lt$deadline){Start-Sleep -Milliseconds 50}
-    if(-not(Test-Path -LiteralPath (Join-Path $runDirectory "$peer.concurrent-ready"))){throw "Blind reviewer peer '$peer' did not start concurrently."}
+    while(-not(Test-Path -LiteralPath (Join-Path $coordinationRoot "$peer.concurrent-ready"))-and[DateTime]::UtcNow-lt$deadline){Start-Sleep -Milliseconds 50}
+    if(-not(Test-Path -LiteralPath (Join-Path $coordinationRoot "$peer.concurrent-ready"))){throw "Blind reviewer peer '$peer' did not start concurrently."}
     if($scenario-eq'REVIEWER_A_BLOCKER'){
         if($artifact-eq'reviewer-a'){$response.status='blocker';$response.reason='Pinned review rules conflict.';$response|ConvertTo-Json -Depth 20|Set-Content $env:CONTRACT_REVIEW_OUTPUT_PATH -Encoding utf8;exit 0}
         $peerChild=Start-Process -FilePath (Get-Command pwsh.exe).Path -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 300') -PassThru
@@ -97,4 +97,20 @@ switch($role){
     }
     default {throw "Unexpected fake role: $role"}
 }
+$peerBlindness=$role-eq'blind-reviewer'-and$scenario-eq'REQUIRE_PEER_BLINDNESS'
+if($peerBlindness-and$artifact-eq'reviewer-b'){
+    $coordinationRoot=$env:CONTRACT_REVIEW_TEST_COORDINATION_ROOT
+    $completionMarker=Join-Path $coordinationRoot 'reviewer-a-response-ready'
+    $deadline=[DateTime]::UtcNow.AddSeconds(5)
+    while(-not(Test-Path -LiteralPath $completionMarker)-and[DateTime]::UtcNow-lt$deadline){Start-Sleep -Milliseconds 50}
+    if(-not(Test-Path -LiteralPath $completionMarker)){throw 'Reviewer A did not finish before the peer-blindness check.'}
+    $requestId=$env:CONTRACT_REVIEW_TEST_REQUEST_ID
+    $runnerRoot=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $sharedRuns=@(Get-ChildItem -LiteralPath (Join-Path $runnerRoot 'runs') -Directory|Where-Object Name -Like "$requestId-*")
+    if($sharedRuns.Count-ne1){throw "Could not identify the shared run for $requestId."}
+    if(Test-Path -LiteralPath (Join-Path $sharedRuns[0].FullName 'reviewer-a.json')){throw 'Reviewer A answer was published before Reviewer B ended.'}
+}
 $response|ConvertTo-Json -Depth 20|Set-Content $env:CONTRACT_REVIEW_OUTPUT_PATH -Encoding utf8
+if($peerBlindness-and$artifact-eq'reviewer-a'){
+    [IO.File]::WriteAllText((Join-Path $env:CONTRACT_REVIEW_TEST_COORDINATION_ROOT 'reviewer-a-response-ready'),'ready',[Text.UTF8Encoding]::new($false))
+}

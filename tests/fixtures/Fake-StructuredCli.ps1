@@ -40,8 +40,6 @@ $modelIndex=[array]::IndexOf($CliArguments,'--model');if($CliArguments[$modelInd
 $schemaIndex=[array]::IndexOf($CliArguments,'--output-schema');$schema=Get-Content $CliArguments[$schemaIndex+1]-Raw|ConvertFrom-Json;Assert-StrictSchema $schema
 foreach($feature in @('apps','browser_use','computer_use','hooks','memories','multi_agent','plugins','shell_tool','unified_exec')){for($i=0;$i-lt$CliArguments.Count-1;$i++){if($CliArguments[$i]-eq'--disable'-and$CliArguments[$i+1]-eq$feature){continue 2}};throw "Codex feature not disabled: $feature"}
 $outputIndex=[array]::IndexOf($CliArguments,'--output-last-message')
-$response=Envelope
-if($stdin-match'capability isolation preflight'-and(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'provider-isolation-exposed.flag'))){$response.status='blocker';$response.reason='callable tool exposure detected'}
-$response|ConvertTo-Json -Depth 20|Set-Content $CliArguments[$outputIndex+1] -Encoding utf8
+(Envelope)|ConvertTo-Json -Depth 20|Set-Content $CliArguments[$outputIndex+1] -Encoding utf8
 }
 }
