@@ -1,6 +1,6 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'ContractReview.Runtime.ps1')
+. (Join-Path $PSScriptRoot 'ContractReview.Core.ps1')
 function Repair-InterruptedContractReview {
     [CmdletBinding()]
     param([Parameter(Mandatory=$true)][string]$RunDirectory,[Parameter(Mandatory=$true)][string]$Reason,[string]$RunnerRoot=(Split-Path -Parent $PSScriptRoot),[ValidateRange(1,3600)][int]$GitTimeoutSeconds=60)
@@ -11,14 +11,8 @@ function Repair-InterruptedContractReview {
     $execution=Read-ContractReviewJson -Path (Join-Path $run 'execution-manifest.json') -Label 'execution manifest'
     $target=[string]$execution.targetRepository;$worktree=Join-Path $run 'worktree';$terminated=@()
     foreach($receipt in Get-ChildItem -LiteralPath $run -Filter '*.invocation.json' -File){
-        $invocation=Read-ContractReviewJson -Path $receipt.FullName -Label 'invocation receipt';$childId=[int]$invocation.adapterProcessId
-        $process=if($childId -gt 0){Get-Process -Id $childId -ErrorAction SilentlyContinue}else{$null}
-        if($process){
-            if([string]::IsNullOrWhiteSpace([string]$invocation.adapterProcessStartTimeUtc)){throw "Live PID $childId has no recorded start time; refusing unsafe recovery termination."}
-            $recorded=[DateTime]::Parse([string]$invocation.adapterProcessStartTimeUtc,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
-            if($process.StartTime.ToUniversalTime().Ticks-ne$recorded.Ticks){throw "Live PID $childId no longer matches its invocation receipt; refusing to terminate a reused PID."}
-            Stop-ContractReviewProcessTree -ProcessId $childId;$terminated+=$childId
-        }
+        $childId=Stop-ContractReviewRecordedProcessTree -InvocationPath $receipt.FullName
+        if($null-ne$childId){$terminated+=$childId}
     }
     if(Test-Path $worktree){[void](Invoke-ContractReviewGit -Repository $target -Arguments @('worktree','remove','--force',$worktree) -TimeoutSeconds $GitTimeoutSeconds)}
     [void](Invoke-ContractReviewGit -Repository $target -Arguments @('worktree','prune') -TimeoutSeconds $GitTimeoutSeconds)
