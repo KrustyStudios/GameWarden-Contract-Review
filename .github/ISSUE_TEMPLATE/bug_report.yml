@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Do not include credentials, approval receipts, private contracts, personal paths, or unredacted run artifacts. Use the private security-reporting link for vulnerabilities.
+        Do not include credentials, approval phrases, private contracts, personal paths, or unredacted run artifacts. Use the private security-reporting link for vulnerabilities.
   - type: checkboxes
     id: safety
     attributes:
@@ -30,7 +30,7 @@ body:
       label: Reproduction steps
       description: Use sanitized paths and fake-provider inputs whenever possible.
       placeholder: |
-        1. Prepare a sanitized request...
+        1. Select a sanitized guide and source contract...
         2. Run...
         3. Observe...
     validations:
@@ -56,7 +56,6 @@ body:
         - Fake-provider test suite
         - Claude and Codex
         - All Codex
-        - Recovery only
         - Not applicable
     validations:
       required: true

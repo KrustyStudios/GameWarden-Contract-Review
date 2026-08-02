@@ -11,11 +11,8 @@ NEEDS-ATTENTION.txt
 .agents/
 .codex/
 
-# Isolated contract-review run artifacts and one-time approval receipts
+# Contract-review run artifacts
 runs/
-approval-receipts/
-requests/
-launcher-receipts/
 
 # Local credentials and machine-specific configuration
 .env
@@ -25,6 +22,3 @@ launcher-receipts/
 *.pem
 *.pfx
 credentials*.json
-
-# Human decisions are local review inputs
-human-decision*.json

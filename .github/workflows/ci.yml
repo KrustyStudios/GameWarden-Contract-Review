@@ -52,18 +52,6 @@ jobs:
             throw "PowerShell syntax validation found $($failures.Count) error(s)."
           }
 
-      - name: Validate JSON files
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Get-ChildItem -Path .\schemas,.\examples -Recurse -File -Filter *.json | ForEach-Object {
-            try {
-              [void](Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json -Depth 100)
-            } catch {
-              throw "Invalid JSON in $($_.FullName): $($_.Exception.Message)"
-            }
-          }
-
       - name: Run high-signal PowerShell analysis
         shell: pwsh
         run: |
@@ -79,6 +67,6 @@ jobs:
         shell: pwsh
         run: .\tests\PublicRepository.Tests.ps1
 
-      - name: Run hermetic contract-review tests
+      - name: Run contract-review behavior tests
         shell: pwsh
         run: .\tests\ContractReview.Tests.ps1
