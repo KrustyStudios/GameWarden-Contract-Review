@@ -1,0 +1,12 @@
+# The repository currently has one organization member. This requests owner
+# review without creating an impossible self-approval requirement.
+* @KrustyGamer134
+
+# Make security-sensitive surfaces explicit for future ownership changes.
+/.github/ @KrustyGamer134
+/SECURITY.md @KrustyGamer134
+/Start-ContractReview.ps1 @KrustyGamer134
+/Recover-InterruptedContractReview.ps1 @KrustyGamer134
+/contract-review/ @KrustyGamer134
+/schemas/ @KrustyGamer134
+/tests/ @KrustyGamer134

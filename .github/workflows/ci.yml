@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+  schedule:
+    - cron: "23 9 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    name: CI Gate
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify PowerShell syntax
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $failures = [System.Collections.Generic.List[string]]::new()
+          Get-ChildItem -Path . -Recurse -File -Include *.ps1,*.psm1,*.psd1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            )
+            foreach ($error in @($errors)) {
+              $failures.Add("$($_.FullName):$($error.Extent.StartLineNumber): $($error.Message)")
+            }
+          }
+          if ($failures.Count -gt 0) {
+            $failures | ForEach-Object { Write-Host $_ }
+            throw "PowerShell syntax validation found $($failures.Count) error(s)."
+          }
+
+      - name: Validate JSON files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem -Path .\schemas,.\examples -Recurse -File -Filter *.json | ForEach-Object {
+            try {
+              [void](Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json -Depth 100)
+            } catch {
+              throw "Invalid JSON in $($_.FullName): $($_.Exception.Message)"
+            }
+          }
+
+      - name: Run high-signal PowerShell analysis
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -ErrorAction Stop
+          $findings = @(Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\.github\PSScriptAnalyzerSettings.psd1)
+          if ($findings.Count -gt 0) {
+            $findings | Format-Table Severity,RuleName,ScriptName,Line,Message -AutoSize | Out-String | Write-Host
+            throw "PSScriptAnalyzer found $($findings.Count) blocking issue(s)."
+          }
+
+      - name: Verify public repository boundary
+        shell: pwsh
+        run: .\tests\PublicRepository.Tests.ps1
+
+      - name: Run hermetic contract-review tests
+        shell: pwsh
+        run: .\tests\ContractReview.Tests.ps1

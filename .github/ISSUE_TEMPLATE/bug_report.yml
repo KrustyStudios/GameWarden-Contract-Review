@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a reproducible problem with the contract-review runner.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, approval receipts, private contracts, personal paths, or unredacted run artifacts. Use the private security-reporting link for vulnerabilities.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private project material, personal paths, and unredacted runtime artifacts.
+          required: true
+        - label: This is not a security vulnerability that should be reported privately.
+          required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Describe the observable behavior and the terminal status.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Use sanitized paths and fake-provider inputs whenever possible.
+      placeholder: |
+        1. Prepare a sanitized request...
+        2. Run...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      description: Provide the commit SHA or release version where this occurred.
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider mode
+      options:
+        - Fake-provider test suite
+        - Claude and Codex
+        - All Codex
+        - Recovery only
+        - Not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: sanitized_evidence
+    attributes:
+      label: Sanitized evidence
+      description: Include only the minimum redacted log or error text needed to diagnose the problem.
