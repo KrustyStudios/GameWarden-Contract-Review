@@ -55,11 +55,16 @@ function Assert-ContractReviewStage1ManifestAccounting {
     if ([string]$Request.reviewKind -ne 'stage1') { return }
     $sourcePath = Join-Path $InputRoot ([string]$Request.stage1.sourceContract)
     $sourceLineCount = [IO.File]::ReadAllLines((Resolve-Path -LiteralPath $sourcePath)).Count
-    $allFindings = @($ReviewerA.findings) + @($ReviewerB.findings)
+    $scopedFindings = @(
+        @($ReviewerA.findings) | ForEach-Object { [pscustomobject]@{ reference="A:$([string]$_.id)"; finding=$_ } }
+        @($ReviewerB.findings) | ForEach-Object { [pscustomobject]@{ reference="B:$([string]$_.id)"; finding=$_ } }
+    )
     $acceptedIds = @($Validation.resolutions | ForEach-Object { @($_.acceptedFindingIds) } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
     $eligible = @{}
-    foreach ($finding in $allFindings) {
-        if ([string]$finding.id -notin $acceptedIds -or [string]$finding.placement.disposition -notin @('MOVE','SPLIT','PHASE-2')) { continue }
+    foreach ($entry in $scopedFindings) {
+        $reference = [string]$entry.reference
+        $finding = $entry.finding
+        if ($reference -notin $acceptedIds -or [string]$finding.placement.disposition -notin @('MOVE','SPLIT','PHASE-2')) { continue }
         $fragments = @($finding.placement.fragments)
         if ($fragments.Count -eq 0) { throw "Accepted Stage 1 finding '$($finding.id)' has no destination fragment assignments." }
         if ([string]$finding.placement.disposition -eq 'MOVE' -and ($fragments.Count -ne 1 -or @($finding.placement.destinations).Count -ne 1)) {
@@ -79,7 +84,7 @@ function Assert-ContractReviewStage1ManifestAccounting {
         if (-not (Test-ContractReviewSameStringSet -Left @($finding.placement.proposedTags) -Right $fragmentTags)) {
             throw "Finding $($finding.id) proposed tags differ from its fragment assignments."
         }
-        $eligible[[string]$finding.id] = $finding
+        $eligible[$reference] = $finding
     }
 
     $actualByFinding = @{}

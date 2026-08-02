@@ -5,7 +5,7 @@
   "additionalProperties": false,
   "required": ["protocolVersion", "requestId", "requestSha256", "targetRepository", "targetRevision", "pinnedObjects", "runnerFiles", "reviewMode", "providers", "timeouts", "cleanup"],
   "properties": {
-    "protocolVersion": { "const": 5 },
+    "protocolVersion": { "const": 6 },
     "requestId": { "type": "string", "minLength": 1 },
     "requestSha256": { "$ref": "#/$defs/sha256" },
     "targetRepository": { "type": "string", "minLength": 1 },
