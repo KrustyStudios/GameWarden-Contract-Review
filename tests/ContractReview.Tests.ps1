@@ -105,6 +105,7 @@ try {
     Start-Sleep -Milliseconds 250
     Assert-True (-not (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) 'Stopped peer left a child process running.'
 
+    $global:LASTEXITCODE = 0
     Write-Host 'ContractReview.Tests.ps1: PASS' -ForegroundColor Green
 } finally {
     Remove-Item Env:\CONTRACT_REVIEW_FAKE_LOG_DIR -ErrorAction SilentlyContinue
