@@ -57,7 +57,7 @@ function Get-ContractReviewExecutionManifest {
         [ordered]@{ provider='claude'; model=$ClaudeModel; reasoningEffort=$null; commandPath=$claudeCommand.path; commandSha256=$claudeCommand.sha256; commandVersion=$claudeCommand.version }
     }
     return [ordered]@{
-        protocolVersion = 5; requestId = [string]$request.requestId; requestSha256 = Get-ContractReviewSha256 -Path $RequestPath
+        protocolVersion = 6; requestId = [string]$request.requestId; requestSha256 = Get-ContractReviewSha256 -Path $RequestPath
         targetRepository = $target.Path; targetRevision = $target.Revision; pinnedObjects = $pinned; runnerFiles = $runnerFiles
         reviewMode = if ($AllCodex) { 'all-codex' } else { 'claude-codex' }
         providers = [ordered]@{
@@ -112,7 +112,7 @@ function Get-ContractReviewApproval {
         [Parameter(Mandatory = $true)][int]$GitTimeoutSeconds,[Parameter(Mandatory = $true)][int]$SplitterTimeoutSeconds,[switch]$AllCodex
     )
     $manifest = Get-ContractReviewExecutionManifest @PSBoundParameters
-    Assert-ContractReviewProviderReadiness -Manifest $manifest -TimeoutSeconds $GitTimeoutSeconds
+    Assert-ContractReviewProviderReadiness -Manifest $manifest -TimeoutSeconds $RoleTimeoutSeconds -CodexAdapter $CodexAdapter
     return "APPROVE CONTRACT REVIEW $($manifest.requestId) $(Get-ContractReviewManifestHash -Manifest $manifest)"
 }
 
@@ -181,8 +181,10 @@ function Invoke-ContractReviewRole {
         CONTRACT_REVIEW_PROVIDER_COMMAND=$ProviderCommand
         CONTRACT_REVIEW_TEST_SCENARIO=[Environment]::GetEnvironmentVariable('CONTRACT_REVIEW_TEST_SCENARIO','Process')
     }
-    $cwd=Join-Path $RunDirectory ("cwd-$ArtifactName"); New-Item -ItemType Directory -Path $cwd | Out-Null
-    $start=New-ContractReviewProcessStartInfo -FilePath (Get-Command pwsh.exe -ErrorAction Stop).Path -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-File',$Adapter) -WorkingDirectory $cwd -Environment $environment -StdoutPath $stdoutPath -StderrPath $stderrPath
+    $providerRoot=Join-Path ([IO.Path]::GetTempPath()) ('contract-review-provider-'+[guid]::NewGuid().ToString('N'))
+    $providerCwd=Join-Path $providerRoot 'provider-cwd';New-Item -ItemType Directory -Path $providerCwd|Out-Null
+    $environment.CONTRACT_REVIEW_PROVIDER_CWD=$providerCwd
+    $start=New-ContractReviewProcessStartInfo -FilePath (Get-Command pwsh.exe -ErrorAction Stop).Path -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-File',$Adapter) -WorkingDirectory $providerCwd -Environment $environment -StdoutPath $stdoutPath -StderrPath $stderrPath
     Write-Host ("[{0}] starting {1} ({2})" -f [DateTime]::Now.ToString('HH:mm:ss'),$ArtifactName,$Provider)
     try {
         $null=Invoke-ContractReviewBoundedProcess -StartInfo $start.Info -StdoutPath $stdoutPath -StderrPath $stderrPath -TimeoutSeconds $TimeoutSeconds -ProgressIntervalSeconds 30 -Label "agent role $ArtifactName" -OnStarted {
@@ -217,7 +219,10 @@ function Invoke-ContractReviewRole {
         }
         throw $failure
     }
-    finally { $invocation.completedUtc=[DateTime]::UtcNow.ToString('o'); Write-ContractReviewAtomicJson -Path $invocationPath -Value $invocation }
+    finally {
+        $invocation.completedUtc=[DateTime]::UtcNow.ToString('o');Write-ContractReviewAtomicJson -Path $invocationPath -Value $invocation
+        if(Test-Path -LiteralPath $providerRoot){Remove-Item -LiteralPath $providerRoot -Recurse -Force}
+    }
 }
 
 function Test-ContractReviewParallelRoleCompleted {
@@ -377,7 +382,7 @@ function Start-ContractReview {
     if ((Get-ContractReviewManifestHash -Manifest $confirmation) -cne $manifestHash) { throw 'A bound execution input changed while the run was being prepared; obtain a new approval.' }
     $request=Read-ContractReviewJson -Path $RequestPath -Label 'request'
     if ((Get-ContractReviewSha256 -Path $RequestPath) -cne $manifest.requestSha256) { throw 'Request changed after approval validation.' }
-    Assert-ContractReviewProviderReadiness -Manifest $manifest -TimeoutSeconds $GitTimeoutSeconds
+    Assert-ContractReviewProviderReadiness -Manifest $manifest -TimeoutSeconds $RoleTimeoutSeconds -CodexAdapter $CodexAdapter
     $claim=Claim-ContractReviewApproval -RunnerRoot $RunnerRoot -RequestId $manifest.requestId -ManifestHash $manifestHash
     $runId="{0}-{1}-{2}" -f $manifest.requestId,[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'),[guid]::NewGuid().ToString('N').Substring(0,8)
     $runDirectory=Join-Path (Join-Path $RunnerRoot 'runs') $runId; New-Item -ItemType Directory -Path $runDirectory -ErrorAction Stop | Out-Null

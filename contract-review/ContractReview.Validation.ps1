@@ -26,6 +26,10 @@ function Get-ContractReviewTagJudgmentRequirement {
     return 'When replacement tag names are both short, descriptive, and compliant, classify each existing tag in its own RESOLVED_BY_JUDGMENT classification, choose and explain the clearer compliant name; tag-wording preference alone is not a USER_DECISION. Each such classification covers exactly one existing tag, and every referenced finding must otherwise agree on disposition, destinations, and exact source fragments. Do not bundle another existing tag, a tag-independent observation, a boundary/range/destination difference, or any other dispute into that classification. Preserve global top-level tag uniqueness as an apply-time uniqueness gate before any RENAME.'
 }
 
+function Get-ContractReviewScopedFindingRequirement {
+    return 'Validator acceptedFindingIds and Stage 1 findingIds must qualify every reviewer-local finding ID as A:<id> or B:<id>. Keep comparator and proof finding IDs unqualified within their already-separated reviewer side.'
+}
+
 function ConvertTo-ContractReviewProviderSchema {
     param([AllowNull()][object]$Node)
     if ($null -eq $Node -or $Node -is [string] -or $Node -is [ValueType]) { return }
@@ -113,6 +117,8 @@ function Assert-ContractReviewRequest {
         '(?im)\blines?\s+\d+', '(?im)\b\d+\s*[-–]\s*\d+\b',
         '(?im)\b(move|rename|delete|copy|merge|split)\s+(it|this|that|the\s+rule)\b',
         '(?im)\b(destination|solution|fix|expected\s+answer)\s*:',
+        '(?im)(?:^|[\s''"`(])(?:contracts?[\\/])(?:[A-Za-z0-9._-]+[\\/])*[A-Za-z0-9._-]+\.md\b',
+        '(?im)\b[A-Za-z0-9._-]+_CONTRACT\.md\b',
         '(?im)APPROVE\s+CONTRACT\s+(APPLY|REVIEW)', '(?im)\baccording\s+to\s+ticket\b'
     )
     foreach ($pattern in $forbidden) { if ($neutralText -match $pattern) { throw "Request violates the ticket firewall (matched '$pattern')." } }
@@ -158,8 +164,8 @@ function New-ContractReviewPrompt {
     $roleInstruction = switch ($Role) {
         'blind-reviewer' { 'Independently inspect every supplied input. Report every relevant finding, including placement and tag/disposition details. For Stage 1 placement findings, list the exact source line range, final contract path, and proposed tag metadata for every destination-specific fragment. Do not infer a desired answer.' }
         'comparator' { "Account for every finding from both blind reviews exactly once. Classify agreements and differences; resolve by reading when the immutable inputs prove the answer. $(Get-ContractReviewTagJudgmentRequirement)" }
-        'proof-reviewer' { 'For every NEEDS_PROOF classification, defend, qualify, or withdraw your own finding using only cited immutable input evidence.' }
-        'validator' { "Recheck all blind findings, classifications, and proofs against the immutable inputs. Produce exactly one final resolution for every classification and expose every remaining user choice. Every Stage 1 manifest row must cite the accepted finding IDs it implements and must reproduce their destination fragment assignments exactly. Reject unnecessary escalation by enforcing this rule: $(Get-ContractReviewTagJudgmentRequirement)" }
+        'proof-reviewer' { 'For every NEEDS_PROOF classification, defend, qualify, withdraw, or request a user decision for your own finding using cited immutable input evidence. Every proof position requires at least one source citation.' }
+        'validator' { "Recheck all blind findings, classifications, and proofs against the immutable inputs. Produce exactly one final resolution for every classification and expose every remaining user choice. Every Stage 1 manifest row must cite the accepted finding IDs it implements and must reproduce their destination fragment assignments exactly. $(Get-ContractReviewScopedFindingRequirement) Reject unnecessary escalation by enforcing this rule: $(Get-ContractReviewTagJudgmentRequirement)" }
         default { throw "Unknown prompt role '$Role'." }
     }
     $payloadText = if ($null -eq $Payload) { '{}' } else { $Payload | ConvertTo-Json -Depth 64 -Compress }
@@ -306,6 +312,7 @@ function Assert-ContractReviewResponse {
             Assert-ContractReviewExactProperties -Value $proof -Required @('classificationId','findingIds','position','evidence','rationale') -Label 'proof'
             if ([string]$proof.position -notin @('CONFIRM','WITHDRAW','QUALIFY','USER_DECISION')) { throw "Invalid proof position '$($proof.position)'." }
             Assert-ContractReviewEvidence -Evidence @($proof.evidence) -Label "proof $($proof.classificationId)"
+            if (@($proof.evidence).Count -eq 0) { throw "Proof $($proof.classificationId) requires source evidence." }
             Assert-ContractReviewUniqueStrings -Values @($proof.findingIds) -Label "proof $($proof.classificationId) findingIds"
         }
     }
@@ -381,7 +388,8 @@ function Assert-ContractReviewValidationAccounting {
     if (-not(Test-ContractReviewSameStringSet -Left $classificationIds -Right $resolutionIds)) { throw 'Validation must resolve every classification exactly once.' }
     foreach ($resolution in @($Validation.resolutions)) {
         $classification = @($Comparison.classifications | Where-Object id -eq $resolution.classificationId)[0]
-        $a = @($classification.reviewerAFindingIds); $b = @($classification.reviewerBFindingIds)
+        $a = @($classification.reviewerAFindingIds | ForEach-Object { "A:$([string]$_)" })
+        $b = @($classification.reviewerBFindingIds | ForEach-Object { "B:$([string]$_)" })
         $expected = switch ([string]$resolution.outcome) {
             'ACCEPT_A' { $a }
             'ACCEPT_B' { $b }

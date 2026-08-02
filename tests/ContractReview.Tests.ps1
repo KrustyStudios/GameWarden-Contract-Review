@@ -54,6 +54,9 @@ try{
     $baseSchema=Get-Content $baseSchemaPath -Raw|ConvertFrom-Json
     $uniqueArrays=@($baseSchema.definitions.placement.properties.destinations,$baseSchema.definitions.placement.properties.proposedTags,$baseSchema.definitions.placement.properties.fragments,$baseSchema.definitions.comparison.properties.reviewerAFindingIds,$baseSchema.definitions.comparison.properties.reviewerBFindingIds,$baseSchema.definitions.proof.properties.findingIds,$baseSchema.definitions.resolution.properties.acceptedFindingIds,$baseSchema.definitions.unresolved.properties.options,$baseSchema.definitions.stage1.properties.destinations,$baseSchema.definitions.stage1.properties.perDestinationNames,$baseSchema.definitions.stage1.properties.findingIds)
     Assert-That (@($uniqueArrays|Where-Object{$_.uniqueItems-ne$true}).Count-eq0) 'Canonical schema lost a required uniqueness constraint.'
+    Assert-That ($baseSchema.definitions.proof.properties.evidence.minItems-eq1) 'Canonical schema permits a proof with no source evidence.'
+    Assert-That ([string]$baseSchema.definitions.resolution.properties.acceptedFindingIds.items.pattern-ceq'^[AB]:.+$') 'Validator acceptedFindingIds are not reviewer-qualified.'
+    Assert-That ([string]$baseSchema.definitions.stage1.properties.findingIds.items.pattern-ceq'^[AB]:.+$') 'Stage 1 findingIds are not reviewer-qualified.'
     Assert-That ((Get-Content $blindSchemaPath -Raw)-notmatch '"uniqueItems"') 'Provider-facing blind schema leaked unsupported uniqueItems.'
     Assert-That ((Get-Content $validatorSchemaPath -Raw)-notmatch '"uniqueItems"') 'Provider-facing validator schema leaked unsupported uniqueItems.'
     Assert-That ($blindSchema.properties.stage1Manifest.maxItems-eq0-and$blindSchema.properties.classifications.maxItems-eq0) 'Blind schema did not mechanically forbid role-inappropriate arrays.'
@@ -72,6 +75,7 @@ try{
     $validatorPrompt=New-ContractReviewPrompt -Role validator -Request ([pscustomobject]@{reviewSubject='subject';neutralQuestion='question'}) -InputBundle 'input' -Payload $null
     Assert-That ($comparatorPrompt.Contains($tagJudgmentRequirement)-and$comparatorPrompt-match'exactly one existing tag'-and$comparatorPrompt-match'Do not bundle') 'Comparator prompt omitted the locked replacement-tag judgment contract.'
     Assert-That ($validatorPrompt.Contains($tagJudgmentRequirement)-and$validatorPrompt-match'exactly one existing tag'-and$validatorPrompt-match'Do not bundle') 'Validator prompt omitted the locked replacement-tag judgment contract.'
+    Assert-That ($validatorPrompt-match'A:<id>.*B:<id>') 'Validator prompt omitted reviewer-qualified finding references.'
     New-Item -ItemType Directory -Path (Join-Path $target 'contracts'),(Join-Path $target '.design'),(Join-Path $target 'tools\ai')|Out-Null
     [IO.File]::WriteAllText((Join-Path $target 'contracts\sample.md'),"# Sample`n`nA generic rule.",[Text.UTF8Encoding]::new($false))
     Set-Content (Join-Path $target 'AI_RULES.md') 'Rules apply. The epic governs review protocol.' -Encoding utf8
@@ -84,7 +88,8 @@ try{
     Write-Host 'adapter boundary tests...'
     $adapterPrompt=Join-Path $requests 'adapter-prompt.txt';$adapterOutput=Join-Path $requests 'adapter-output.json';$adapterMetadata=Join-Path $requests 'adapter-metadata.json'
     Set-Content $adapterPrompt 'Return the empty valid envelope.' -Encoding utf8
-    $env:CONTRACT_REVIEW_PROMPT_FILE=$adapterPrompt;$env:CONTRACT_REVIEW_OUTPUT_PATH=$adapterOutput;$env:CONTRACT_REVIEW_METADATA_PATH=$adapterMetadata;$env:CONTRACT_REVIEW_SCHEMA_PATH=$blindSchemaPath
+    $adapterProviderCwd=Join-Path $requests 'provider-cwd';New-Item -ItemType Directory -Path $adapterProviderCwd|Out-Null
+    $env:CONTRACT_REVIEW_PROMPT_FILE=$adapterPrompt;$env:CONTRACT_REVIEW_OUTPUT_PATH=$adapterOutput;$env:CONTRACT_REVIEW_METADATA_PATH=$adapterMetadata;$env:CONTRACT_REVIEW_SCHEMA_PATH=$blindSchemaPath;$env:CONTRACT_REVIEW_PROVIDER_CWD=$adapterProviderCwd
     $env:CONTRACT_REVIEW_MODEL='claude-fable-5';$env:CONTRACT_REVIEW_PROVIDER_COMMAND=Join-Path $runnerRoot 'tests\fixtures\Fake-StructuredCli.ps1'
     & pwsh -NoLogo -NoProfile -NonInteractive -File (Join-Path $runnerRoot 'contract-review\Invoke-ClaudeReview.ps1');if($LASTEXITCODE-ne0){throw 'Claude adapter fixture failed.'}
     $claudeMeta=Get-Content $adapterMetadata -Raw|ConvertFrom-Json;Assert-That ($claudeMeta.safeMode-and$claudeMeta.promptTransport-eq'stdin'-and@($claudeMeta.tools).Count-eq0) 'Claude adapter isolation flags were not enforced.'
@@ -93,8 +98,8 @@ try{
     Remove-Item (Join-Path $runnerRoot 'tests\fixtures\provider-late-auth.flag');Assert-That ($lateAuthExit-eq79-and($lateAuthOutput-join "`n")-match'CONTRACT_REVIEW_PROVIDER_AUTHENTICATION_BLOCKER') 'Claude adapter did not classify a late OAuth rejection as a provider-authentication blocker.'
     Remove-Item $adapterOutput -ErrorAction SilentlyContinue;$env:CONTRACT_REVIEW_MODEL='gpt-5.6-sol';$env:CONTRACT_REVIEW_REASONING_EFFORT='max';$env:CONTRACT_REVIEW_PROVIDER_COMMAND=Join-Path $runnerRoot 'tests\fixtures\Fake-StructuredCli.ps1'
     & pwsh -NoLogo -NoProfile -NonInteractive -File (Join-Path $runnerRoot 'contract-review\Invoke-CodexReview.ps1');if($LASTEXITCODE-ne0){throw 'Codex adapter fixture failed.'}
-    $codexMeta=Get-Content $adapterMetadata -Raw|ConvertFrom-Json;Assert-That ($codexMeta.ephemeral-and$codexMeta.ignoreUserConfig-and$codexMeta.promptTransport-eq'stdin') 'Codex adapter isolation flags were not enforced.'
-    foreach($name in @('CONTRACT_REVIEW_PROMPT_FILE','CONTRACT_REVIEW_OUTPUT_PATH','CONTRACT_REVIEW_METADATA_PATH','CONTRACT_REVIEW_SCHEMA_PATH','CONTRACT_REVIEW_MODEL','CONTRACT_REVIEW_REASONING_EFFORT','CONTRACT_REVIEW_PROVIDER_COMMAND')){Remove-Item "Env:\$name" -ErrorAction SilentlyContinue}
+    $codexMeta=Get-Content $adapterMetadata -Raw|ConvertFrom-Json;Assert-That ($codexMeta.ephemeral-and$codexMeta.ignoreUserConfig-and$codexMeta.promptTransport-eq'stdin'-and$codexMeta.isolatedWorkingDirectory) 'Codex adapter isolation flags were not enforced.'
+    foreach($name in @('CONTRACT_REVIEW_PROMPT_FILE','CONTRACT_REVIEW_OUTPUT_PATH','CONTRACT_REVIEW_METADATA_PATH','CONTRACT_REVIEW_SCHEMA_PATH','CONTRACT_REVIEW_MODEL','CONTRACT_REVIEW_REASONING_EFFORT','CONTRACT_REVIEW_PROVIDER_COMMAND','CONTRACT_REVIEW_PROVIDER_CWD')){Remove-Item "Env:\$name" -ErrorAction SilentlyContinue}
     Write-Host 'adapter boundary tests passed'
 
     $tagPromptPath=Join-Path $requests 'tag-judgment-prompt.txt';Set-Content $tagPromptPath $comparatorPrompt -Encoding utf8
@@ -137,6 +142,10 @@ try{
     $claimBlocked=$false;try{Start-ContractReview @claimBase -Approval $claimApproval|Out-Null}catch{$claimBlocked=$_.Exception.Message-match'claude.*not authenticated'}
     Remove-Item $readinessFlag;Assert-That $claimBlocked 'Provider readiness was not rechecked immediately before claim.'
     $claimHash=$claimApproval.Split(' ')[-1];Assert-That (-not(Test-Path (Join-Path $runnerRoot "approval-receipts\fixture-provider-claim-auth-001-$claimHash.json"))) 'Failed provider readiness consumed the one-time approval.'
+    $isolationFlag=Join-Path $runnerRoot 'tests\fixtures\provider-isolation-exposed.flag';New-Item -ItemType File -Path $isolationFlag|Out-Null
+    $isolationRequest=New-Request 'fixture-provider-isolation-001';$isolationBlocked=$false;$isolationFailure='no failure was raised'
+    try{Get-ContractReviewApproval -RequestPath $isolationRequest -RunnerRoot $runnerRoot -ClaudeAdapter $script:fake -CodexAdapter $script:fake -ClaudeModel 'claude-fable-5' -CodexModel 'gpt-5.6-sol' -CodexReasoningEffort max -RoleTimeoutSeconds 20 -GitTimeoutSeconds 20 -SplitterTimeoutSeconds 20|Out-Null}catch{$isolationFailure=$_.Exception.Message;$isolationBlocked=$isolationFailure-match'isolation preflight'}
+    Remove-Item $isolationFlag;Assert-That $isolationBlocked "Codex capability exposure did not block approval: $isolationFailure"
     Copy-Item (Join-Path $runnerRoot 'tests\fixtures\Incompatible-Splitter.ps1') (Join-Path $target 'tools\ai\split-contract.ps1') -Force;Git @('add','tools/ai/split-contract.ps1')|Out-Null;Git @('commit','-m','incompatible splitter fixture')|Out-Null
     $incompatible=Invoke-FakeRun 'fixture-incompatible-splitter-001' '' 'stage1'
     Assert-That ($incompatible.Packet.status-eq'FAILED') "Incompatible pinned splitter did not fail its pre-provider compatibility probe: $($incompatible.Packet.status)"
@@ -151,7 +160,7 @@ try{
     Assert-That (@($default.Packet.reviewerA.findings).Count-eq1-and@($default.Packet.comparison.classifications).Count-eq1) 'Packet omitted initial/comparison results.'
     Assert-That (@($default.Packet.validation.resolutions).Count-eq1-and@($default.Packet.unresolved).Count-eq1) 'Packet omitted resolutions/unresolved choices.'
     $execution=Get-Content (Join-Path $default.RunDirectory 'execution-manifest.json') -Raw|ConvertFrom-Json
-    Assert-That ($execution.protocolVersion-eq5-and@($execution.providers.PSObject.Properties.Name).Count-eq6-and$execution.providers.reviewerAProof.commandSha256-match'^[a-f0-9]{64}$'-and-not[string]::IsNullOrWhiteSpace([string]$execution.providers.reviewerAProof.commandVersion)) 'Execution manifest omitted versioned proof-role provider command bindings.'
+    Assert-That ($execution.protocolVersion-eq6-and@($execution.providers.PSObject.Properties.Name).Count-eq6-and$execution.providers.reviewerAProof.commandSha256-match'^[a-f0-9]{64}$'-and-not[string]::IsNullOrWhiteSpace([string]$execution.providers.reviewerAProof.commandVersion)) 'Execution manifest omitted versioned proof-role provider command bindings.'
     $invocation=Get-Content (Join-Path $default.RunDirectory 'reviewer-a.invocation.json') -Raw|ConvertFrom-Json;Assert-That (-not[string]::IsNullOrWhiteSpace([string]$invocation.adapterProcessStartTimeUtc)) 'Invocation receipt omitted adapter process identity.'
     $promptA=Get-FileHash (Join-Path $default.RunDirectory 'reviewer-a.prompt.txt');$promptB=Get-FileHash (Join-Path $default.RunDirectory 'reviewer-b.prompt.txt')
     Assert-That ($promptA.Hash-eq$promptB.Hash) 'Blind reviewers did not receive byte-identical prompts.'
@@ -185,7 +194,8 @@ try{
     $env:CONTRACT_REVIEW_CLAUDE_COMMAND=$env:CONTRACT_REVIEW_CODEX_COMMAND
 
     $wrappedEvidence=Invoke-FakeRun 'fixture-wrapped-evidence-001' 'WRAPPED_EVIDENCE';Assert-That ($wrappedEvidence.Packet.status-eq'USER_DECISION_REQUIRED') 'Whitespace-only Markdown wrapping invalidated contiguous source evidence.'
-    foreach($case in @(@('OMIT_FINDING','omitted'),@('UNKNOWN_REF','unknown'),@('PROOF_GAP','proof IDs'),@('PROOF_FINDING_GAP','every finding'),@('RESOLUTION_GAP','resolve every'),@('WRONG_RESOLUTION_FINDING','acceptedFindingIds'),@('BAD_EVIDENCE','contiguous source passage'),@('ELLIPSIS_EVIDENCE','contiguous source passage'),@('ROLE_LEAK','role-inappropriate'))){$run=Invoke-FakeRun ("fixture-{0}-001"-f$case[0].ToLower()) $case[0];Assert-That ($run.Packet.status-eq'FAILED') "$($case[0]) did not fail";Assert-That ($run.Packet.blocker-match$case[1]) "$($case[0]) failure was not explicit: $($run.Packet.blocker)"}
+    foreach($case in @(@('OMIT_FINDING','omitted'),@('UNKNOWN_REF','unknown'),@('PROOF_GAP','proof IDs'),@('PROOF_FINDING_GAP','every finding'),@('EMPTY_PROOF_EVIDENCE','requires source evidence'),@('RESOLUTION_GAP','resolve every'),@('WRONG_RESOLUTION_FINDING','acceptedFindingIds'),@('BAD_EVIDENCE','contiguous source passage'),@('ELLIPSIS_EVIDENCE','contiguous source passage'),@('ROLE_LEAK','role-inappropriate'))){$run=Invoke-FakeRun ("fixture-{0}-001"-f$case[0].ToLower()) $case[0];Assert-That ($run.Packet.status-eq'FAILED') "$($case[0]) did not fail";Assert-That ($run.Packet.blocker-match$case[1]) "$($case[0]) failure was not explicit: $($run.Packet.blocker)"}
+    $collision=Invoke-FakeRun 'fixture-colliding-finding-ids-001' 'COLLIDING_FINDING_IDS';Assert-That ($collision.Packet.status-eq'COMPLETE') "Reviewer-local finding ID collision ended with status $($collision.Packet.status)."
     foreach($scenario in @('DUPLICATE_DESTINATIONS','DUPLICATE_PROPOSED_TAGS','DUPLICATE_A_FINDING_REFS','DUPLICATE_B_FINDING_REFS','DUPLICATE_PROOF_FINDING_REFS','DUPLICATE_ACCEPTED_FINDING_REFS','DUPLICATE_OPTIONS')){$run=Invoke-FakeRun ("fixture-{0}-001"-f$scenario.ToLower()) $scenario;Assert-That ($run.Packet.status-eq'FAILED'-and$run.Packet.blocker-match'duplicate') "$scenario was not mechanically rejected as a duplicate: $($run.Packet.blocker)"}
     foreach($scenario in @('DUPLICATE_STAGE_DESTINATIONS','DUPLICATE_STAGE_NAMES')){$run=Invoke-FakeRun ("fixture-{0}-001"-f$scenario.ToLower()) $scenario 'stage1';Assert-That ($run.Packet.status-eq'FAILED'-and$run.Packet.blocker-match'duplicate') "$scenario was not mechanically rejected as a duplicate: $($run.Packet.blocker)"}
     $blocked=Invoke-FakeRun 'fixture-blocker-001' 'BLOCKER';Assert-That ($blocked.Packet.status-eq'BLOCKED_RULES_OR_SETTINGS') 'Rules/settings blocker did not stop distinctly.'
@@ -219,8 +229,11 @@ try{
     $child=(Get-Content (Join-Path $hang.RunDirectory 'hanging-child.json') -Raw|ConvertFrom-Json).childProcessId;Start-Sleep -Milliseconds 500
     Assert-That (-not(Get-Process -Id $child -ErrorAction SilentlyContinue)) 'Timed-out adapter child process survived.'
 
-    $invalid=Get-Content $default.Request -Raw|ConvertFrom-Json;$invalid.requestId='fixture-invalid-001';$invalid.neutralQuestion='Move the rule to lines 4-9.';$invalidPath=Join-Path $requests 'invalid.json';Write-Json $invalidPath $invalid
-    $firewall=$false;try{Get-ContractReviewApproval -RequestPath $invalidPath -RunnerRoot $runnerRoot -ClaudeAdapter $fake -CodexAdapter $fake -ClaudeModel 'claude-fable-5' -CodexModel 'gpt-5.6-sol' -CodexReasoningEffort max -RoleTimeoutSeconds 20 -GitTimeoutSeconds 20 -SplitterTimeoutSeconds 20|Out-Null}catch{$firewall=$_.Exception.Message-match'ticket firewall'};Assert-That $firewall 'Prescriptive request crossed the ticket firewall.'
+    $invalidTemplate=Get-Content $default.Request -Raw|ConvertFrom-Json
+    foreach($invalidQuestion in @('Move the rule to lines 4-9.','Should this rule belong in contracts/APP_CONTRACT.md?')){
+        $invalid=$invalidTemplate|ConvertTo-Json -Depth 16|ConvertFrom-Json;$invalid.requestId='fixture-invalid-'+[guid]::NewGuid().ToString('N');$invalid.neutralQuestion=$invalidQuestion;$invalidPath=Join-Path $requests "$($invalid.requestId).json";Write-Json $invalidPath $invalid
+        $firewall=$false;try{Get-ContractReviewApproval -RequestPath $invalidPath -RunnerRoot $runnerRoot -ClaudeAdapter $fake -CodexAdapter $fake -ClaudeModel 'claude-fable-5' -CodexModel 'gpt-5.6-sol' -CodexReasoningEffort max -RoleTimeoutSeconds 20 -GitTimeoutSeconds 20 -SplitterTimeoutSeconds 20|Out-Null}catch{$firewall=$_.Exception.Message-match'ticket firewall'};Assert-That $firewall "Prescriptive request crossed the ticket firewall: $invalidQuestion"
+    }
 
     Import-Module (Join-Path $runnerRoot 'contract-review\ContractRecovery.psm1') -Force
     $pidReuseRun=Join-Path $runnerRoot 'runs\fixture-pid-reuse';New-Item -ItemType Directory -Path $pidReuseRun|Out-Null

@@ -86,7 +86,7 @@
         "classificationId": { "type": "string", "minLength": 1 },
         "findingIds": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
         "position": { "enum": ["CONFIRM", "WITHDRAW", "QUALIFY", "USER_DECISION"] },
-        "evidence": { "type": "array", "items": { "$ref": "#/definitions/evidence" } },
+        "evidence": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/evidence" } },
         "rationale": { "type": "string", "minLength": 1 }
       }
     },
@@ -97,7 +97,7 @@
       "properties": {
         "classificationId": { "type": "string", "minLength": 1 },
         "outcome": { "enum": ["ACCEPT_A", "ACCEPT_B", "ACCEPT_BOTH", "REJECT_BOTH", "USER_DECISION"] },
-        "acceptedFindingIds": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "acceptedFindingIds": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[AB]:.+$" } },
         "evidence": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/evidence" } },
         "rationale": { "type": "string", "minLength": 1 }
       }
@@ -123,7 +123,7 @@
         "name": { "type": "string", "minLength": 1 },
         "disposition": { "enum": ["MOVE", "SPLIT", "PHASE-2"] },
         "perDestinationNames": { "type": ["array", "null"], "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
-        "findingIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+        "findingIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[AB]:.+$" } }
       }
     }
   }

@@ -33,10 +33,15 @@ if($CliArguments -contains '--output-format'){
     @{is_error=$false;result=(Envelope|ConvertTo-Json -Compress -Depth 20)}|ConvertTo-Json -Compress
 }else{
 foreach($flag in @('--ephemeral','--ignore-user-config','--ignore-rules','--strict-config','--sandbox','--output-schema','--output-last-message')){if($CliArguments -notcontains $flag){throw "Codex isolation flag missing: $flag"}}
+if((Split-Path -Leaf (Get-Location).Path)-ne'provider-cwd'){throw 'Codex did not start in the isolated provider directory.'}
+if(@(Get-ChildItem -Force).Count-ne0){throw 'Codex provider directory was not empty at launch.'}
 if($CliArguments[-1] -ne '-'){throw 'Codex prompt must use stdin marker.'}
 $modelIndex=[array]::IndexOf($CliArguments,'--model');if($CliArguments[$modelIndex+1]-ne'gpt-5.6-sol'){throw 'Wrong Codex model.'}
 $schemaIndex=[array]::IndexOf($CliArguments,'--output-schema');$schema=Get-Content $CliArguments[$schemaIndex+1]-Raw|ConvertFrom-Json;Assert-StrictSchema $schema
 foreach($feature in @('apps','browser_use','computer_use','hooks','memories','multi_agent','plugins','shell_tool','unified_exec')){for($i=0;$i-lt$CliArguments.Count-1;$i++){if($CliArguments[$i]-eq'--disable'-and$CliArguments[$i+1]-eq$feature){continue 2}};throw "Codex feature not disabled: $feature"}
-$outputIndex=[array]::IndexOf($CliArguments,'--output-last-message');Envelope|ConvertTo-Json -Depth 20|Set-Content $CliArguments[$outputIndex+1] -Encoding utf8
+$outputIndex=[array]::IndexOf($CliArguments,'--output-last-message')
+$response=Envelope
+if($stdin-match'capability isolation preflight'-and(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'provider-isolation-exposed.flag'))){$response.status='blocker';$response.reason='callable tool exposure detected'}
+$response|ConvertTo-Json -Depth 20|Set-Content $CliArguments[$outputIndex+1] -Encoding utf8
 }
 }
