@@ -13,7 +13,7 @@ Public updates use a clean, allowlisted export based on this repository's `main`
 ## Locked flow
 
 1. One fresh Claude CLI and one fresh Codex CLI receive the same byte-identical blind-review prompt and run concurrently. `-AllCodex` substitutes a second fresh Codex CLI for Claude. Comparison starts only after both succeed.
-2. A fresh Codex comparator accounts for every finding as `AGREED`, `RESOLVED_BY_READING`, `RESOLVED_BY_JUDGMENT`, `ONE_SIDED`, `NEEDS_PROOF`, or `USER_DECISION`. Judgment resolution is limited to choosing between otherwise compliant replacement-tag names.
+2. A fresh Codex comparator accounts for every finding as `AGREED`, `RESOLVED_BY_READING`, `RESOLVED_BY_JUDGMENT`, `ONE_SIDED`, `NEEDS_PROOF`, or `USER_DECISION`. Judgment resolution is limited to choosing between otherwise compliant replacement-tag names. Each judgment classification covers exactly one existing tag and must preserve identical disposition, destinations, and source fragments apart from the proposed replacement name; other differences are classified separately.
 3. Each original reviewer receives the `NEEDS_PROOF` set and only its own findings, then proves, qualifies, withdraws, or exposes a user choice.
 4. A fresh Codex validator receives both initial reviews, every classification, and both proof responses. The coordinator rejects missing, duplicate, or unknown references mechanically.
 5. The packet is `COMPLETE`, `USER_DECISION_REQUIRED`, `BLOCKED_RULES_OR_SETTINGS`, or `FAILED`. The human decides any unresolved choice.

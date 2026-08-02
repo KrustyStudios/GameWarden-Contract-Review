@@ -13,7 +13,9 @@ function Evidence {
     }
     @([ordered]@{source='contracts/sample.md';locator='rule paragraph';excerpt=$excerpt})
 }
-function Finding([string]$Id,[string]$Claim){[ordered]@{id=$Id;claim=$Claim;evidence=Evidence;classification='fact';placement=[ordered]@{disposition='MOVE';destinations=@('contracts/SAMPLE_CONTRACT.md');existingTag='[sample]';proposedTags=@('[sample renamed]');fragments=@();rationale='Generic ownership.'}}}
+function Finding([string]$Id,[string]$Claim,[string]$ExistingTag='[sample]',[string]$ProposedTag='[sample renamed]'){
+    [ordered]@{id=$Id;claim=$Claim;evidence=Evidence;classification='fact';placement=[ordered]@{disposition='MOVE';destinations=@('contracts/SAMPLE_CONTRACT.md');existingTag=$ExistingTag;proposedTags=@($ProposedTag);fragments=@();rationale='Generic ownership.'}}
+}
 $scenario=$env:CONTRACT_REVIEW_TEST_SCENARIO;$artifact=$env:CONTRACT_REVIEW_ARTIFACT_NAME;$role=$env:CONTRACT_REVIEW_ROLE;$response=New-Envelope
 $isStage1=$prompt -match '"reviewKind":"stage1"'
 $runDirectory=Split-Path -Parent $env:CONTRACT_REVIEW_OUTPUT_PATH
@@ -37,7 +39,15 @@ switch($role){
         if($artifact -eq 'reviewer-a'){$response.findings=@(Finding A1 'Parent owns the generic rule.')}else{$response.findings=@(Finding B1 'Child changes the generic rule.')}
         if($isStage1){$response.findings[0].placement.fragments=@([ordered]@{start=1;end=3;destination='contracts/SAMPLE_CONTRACT.md';proposedTag='[sample renamed]'})}
         if($scenario -eq 'TAG_JUDGMENT'){
-            if($artifact -eq 'reviewer-a'){$response.findings[0].placement.proposedTags=@('[server install]')}else{$response.findings[0].placement.proposedTags=@('[steamcmd installation]')}
+            if($artifact -eq 'reviewer-a'){
+                $response.findings[0].placement.proposedTags=@('[server install]')
+                $response.findings+=@(Finding A2 'The progress fallback stays in the same contract.' '[sample progress]' '[output fallback]')
+            }else{
+                $response.findings[0].placement.proposedTags=@('[steamcmd installation]')
+                $response.findings+=@(Finding B2 'The progress fallback stays in the same contract.' '[sample progress]' '[stdout progress fallback]')
+            }
+            $response.findings[0].placement.fragments=@([ordered]@{start=1;end=3;destination='contracts/SAMPLE_CONTRACT.md';proposedTag=$response.findings[0].placement.proposedTags[0]})
+            $response.findings[1].placement.fragments=@([ordered]@{start=4;end=6;destination='contracts/SAMPLE_CONTRACT.md';proposedTag=$response.findings[1].placement.proposedTags[0]})
         }
         if($scenario -eq 'DUPLICATE_DESTINATIONS'){$response.findings[0].placement.destinations=@('contracts/SAMPLE_CONTRACT.md','contracts/SAMPLE_CONTRACT.md')}
         if($scenario -eq 'DUPLICATE_PROPOSED_TAGS'){$response.findings[0].placement.proposedTags=@('[sample]','[sample]')}
@@ -47,7 +57,10 @@ switch($role){
     }
     'comparator' {
         $response.classifications=@([ordered]@{id='C1';classification='NEEDS_PROOF';statement='Parent versus child placement.';reviewerAFindingIds=@('A1');reviewerBFindingIds=@('B1');evidence=Evidence;rationale='The reviews differ.'})
-        if($scenario -eq 'TAG_JUDGMENT'){$response.classifications[0].classification='RESOLVED_BY_JUDGMENT';$response.classifications[0].statement='Both proposed tags are compliant; choose the clearer replacement.';$response.classifications[0].rationale='[steamcmd installation] is the clearer compliant name for this contract.'}
+        if($scenario -eq 'TAG_JUDGMENT'){
+            $response.classifications[0].classification='RESOLVED_BY_JUDGMENT';$response.classifications[0].statement='Both proposed tags are compliant; choose the clearer replacement.';$response.classifications[0].rationale='[steamcmd installation] is the clearer compliant name for this contract.'
+            $response.classifications+=@([ordered]@{id='C2';classification='RESOLVED_BY_JUDGMENT';statement='Both progress tags are compliant; choose the clearer replacement.';reviewerAFindingIds=@('A2');reviewerBFindingIds=@('B2');evidence=Evidence;rationale='[stdout progress fallback] is the clearer compliant name for this behavior.'})
+        }
         if($scenario -eq 'OMIT_FINDING'){$response.classifications[0].reviewerBFindingIds=@()}
         if($scenario -eq 'UNKNOWN_REF'){$response.classifications[0].reviewerAFindingIds=@('missing')}
         if($scenario -eq 'PROOF_FINDING_GAP'){$response.classifications[0].reviewerAFindingIds=@('A1','A2')}
@@ -59,6 +72,7 @@ switch($role){
     'validator' {
         $outcome=if($scenario -in @('COMPLETE','STAGE1','ROLE_SCHEMA_STAGE1','DESTINATION_FRAGMENT_SPLIT')){'ACCEPT_A'}elseif($scenario -eq 'TAG_JUDGMENT'){'ACCEPT_B'}else{'USER_DECISION'}
         $response.resolutions=@([ordered]@{classificationId='C1';outcome=$outcome;acceptedFindingIds=@($(if($outcome -eq 'ACCEPT_A'){'A1'}elseif($outcome -eq 'ACCEPT_B'){'B1'}));evidence=Evidence;rationale='Rechecked against the input.'})
+        if($scenario -eq 'TAG_JUDGMENT'){$response.resolutions+=@([ordered]@{classificationId='C2';outcome='ACCEPT_B';acceptedFindingIds=@('B2');evidence=Evidence;rationale='Rechecked the second independent tag choice against the input.'})}
         if($outcome -eq 'USER_DECISION'){$response.unresolved=@([ordered]@{id='C1';reason='The evidence leaves a policy choice.';options=@('parent','child')})}
         if($scenario -eq 'RESOLUTION_GAP'){$response.resolutions=@();$response.unresolved=@()}
         if($scenario -eq 'WRONG_RESOLUTION_FINDING'){$response.resolutions[0].outcome='ACCEPT_A';$response.resolutions[0].acceptedFindingIds=@('B1');$response.unresolved=@()}

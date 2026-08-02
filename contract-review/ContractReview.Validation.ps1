@@ -23,7 +23,7 @@ function Get-ContractReviewUniquenessRequirement {
 }
 
 function Get-ContractReviewTagJudgmentRequirement {
-    return 'When replacement tag names are both short, descriptive, and compliant, classify the difference as RESOLVED_BY_JUDGMENT, choose and explain the clearer compliant name; tag-wording preference alone is not a USER_DECISION. Preserve global top-level tag uniqueness as an apply-time uniqueness gate before any RENAME.'
+    return 'When replacement tag names are both short, descriptive, and compliant, classify each existing tag in its own RESOLVED_BY_JUDGMENT classification, choose and explain the clearer compliant name; tag-wording preference alone is not a USER_DECISION. Each such classification covers exactly one existing tag, and every referenced finding must otherwise agree on disposition, destinations, and exact source fragments. Do not bundle another existing tag, a tag-independent observation, a boundary/range/destination difference, or any other dispute into that classification. Preserve global top-level tag uniqueness as an apply-time uniqueness gate before any RENAME.'
 }
 
 function ConvertTo-ContractReviewProviderSchema {
@@ -55,6 +55,9 @@ function New-ContractReviewRoleSchema {
     $schema = Read-ContractReviewJson -Path $BaseSchemaPath -Label 'base agent response schema'
     if ($null -eq $schema.definitions.evidence.properties.excerpt) { throw 'Base response schema is missing the evidence excerpt definition.' }
     $schema.definitions.evidence.properties.excerpt | Add-Member -NotePropertyName description -NotePropertyValue (Get-ContractReviewEvidenceRequirement) -Force
+    if ($null -eq $schema.definitions.comparison.properties.classification) { throw 'Base response schema is missing the comparison classification definition.' }
+    $classificationDescription = [string]$schema.definitions.comparison.properties.classification.description
+    $schema.definitions.comparison.properties.classification.description = "$classificationDescription $(Get-ContractReviewTagJudgmentRequirement)".Trim()
     $allowed = @(Get-ContractReviewRoleAllowedFields -Role $Role)
     foreach ($field in $script:ContractReviewResponseArrays) {
         if ($schema.properties.PSObject.Properties.Name -notcontains $field) { throw "Base response schema is missing '$field'." }
@@ -342,12 +345,16 @@ function Assert-ContractReviewComparisonAccounting {
             $bTags = @($bFindings | ForEach-Object { @($_.placement.proposedTags) } | ForEach-Object { [string]$_ })
             $aDestinations = @($aFindings | ForEach-Object { @($_.placement.destinations) } | ForEach-Object { [string]$_ })
             $bDestinations = @($bFindings | ForEach-Object { @($_.placement.destinations) } | ForEach-Object { [string]$_ })
+            $aFragments = @($aFindings | ForEach-Object { @($_.placement.fragments) } | ForEach-Object { Get-ContractReviewStage1AssignmentKey -Start $_.start -End $_.end -Destination ([string]$_.destination) -ProposedTag $null } | Sort-Object -Unique)
+            $bFragments = @($bFindings | ForEach-Object { @($_.placement.fragments) } | ForEach-Object { Get-ContractReviewStage1AssignmentKey -Start $_.start -End $_.end -Destination ([string]$_.destination) -ProposedTag $null } | Sort-Object -Unique)
             $dispositions = @($aFindings + $bFindings | ForEach-Object { [string]$_.placement.disposition } | Sort-Object -Unique)
             $existingTags = @($aFindings + $bFindings | ForEach-Object { [string]$_.placement.existingTag } | Sort-Object -Unique)
             $isTagOnlyDifference = $aFindings.Count -gt 0 -and $bFindings.Count -gt 0 -and $aTags.Count -gt 0 -and $bTags.Count -gt 0 -and
                 -not(Test-ContractReviewSameStringSet -Left $aTags -Right $bTags) -and
-                (Test-ContractReviewSameStringSet -Left $aDestinations -Right $bDestinations) -and $dispositions.Count -eq 1 -and $existingTags.Count -eq 1
-            if (-not$isTagOnlyDifference) { throw "Classification $($item.id) may use RESOLVED_BY_JUDGMENT only for a replacement-tag difference whose placement otherwise agrees." }
+                (Test-ContractReviewSameStringSet -Left @($aDestinations | Sort-Object -Unique) -Right @($bDestinations | Sort-Object -Unique)) -and
+                (Test-ContractReviewSameStringSet -Left $aFragments -Right $bFragments) -and
+                $dispositions.Count -eq 1 -and $existingTags.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace([string]$existingTags[0])
+            if (-not$isTagOnlyDifference) { throw "Classification $($item.id) may use RESOLVED_BY_JUDGMENT only for one replacement-tag difference covering exactly one existing tag and no unrelated findings; its placement otherwise agrees in disposition, destinations, and exact source fragments." }
         }
     }
     foreach ($id in $aIds) { if ($id -notin $seenA) { throw "Reviewer A finding '$id' was omitted by the comparator." } }

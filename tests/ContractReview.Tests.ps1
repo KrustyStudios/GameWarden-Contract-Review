@@ -60,7 +60,9 @@ try{
     Assert-That ('RESOLVED_BY_JUDGMENT'-in@($comparatorSchema.definitions.comparison.properties.classification.enum)) 'Comparator provider schema omitted RESOLVED_BY_JUDGMENT.'
     Assert-That ($validatorSchema.properties.stage1Manifest.PSObject.Properties.Name-notcontains'maxItems'-and$validatorSchema.properties.findings.maxItems-eq0) 'Validator schema did not allow only validator-owned arrays.'
     $evidenceRequirement=Get-ContractReviewEvidenceRequirement
+    $tagJudgmentRequirement=Get-ContractReviewTagJudgmentRequirement
     Assert-That ([string]$blindSchema.definitions.evidence.properties.excerpt.description-ceq$evidenceRequirement) 'Provider schema omitted the canonical evidence-excerpt contract.'
+    Assert-That ([string]$comparatorSchema.definitions.comparison.properties.classification.description-like"*$tagJudgmentRequirement*") 'Comparator provider schema omitted the canonical tag-judgment contract.'
     $rolePrompt=New-ContractReviewPrompt -Role blind-reviewer -Request ([pscustomobject]@{reviewSubject='subject';neutralQuestion='question'}) -InputBundle 'input' -Payload $null
     Assert-That ($rolePrompt-match'Only these response arrays may be non-empty for blind-reviewer: findings\.') 'Blind prompt omitted its explicit role-field contract.'
     Assert-That ($rolePrompt.Contains($evidenceRequirement)) 'Blind prompt omitted the canonical evidence-excerpt contract.'
@@ -68,8 +70,8 @@ try{
     Assert-That ($rolePrompt-match'exact source line range'-and$rolePrompt-match'destination-specific fragment') 'Blind prompt omitted the Stage 1 fragment-assignment contract.'
     $comparatorPrompt=New-ContractReviewPrompt -Role comparator -Request ([pscustomobject]@{reviewSubject='subject';neutralQuestion='question'}) -InputBundle 'input' -Payload $null
     $validatorPrompt=New-ContractReviewPrompt -Role validator -Request ([pscustomobject]@{reviewSubject='subject';neutralQuestion='question'}) -InputBundle 'input' -Payload $null
-    Assert-That ($comparatorPrompt-match'RESOLVED_BY_JUDGMENT'-and$comparatorPrompt-match'tag-wording preference alone is not a USER_DECISION'-and$comparatorPrompt-match'apply-time uniqueness gate') 'Comparator prompt omitted the locked replacement-tag judgment contract.'
-    Assert-That ($validatorPrompt-match'RESOLVED_BY_JUDGMENT'-and$validatorPrompt-match'tag-wording preference alone is not a USER_DECISION'-and$validatorPrompt-match'apply-time uniqueness gate') 'Validator prompt omitted the locked replacement-tag judgment contract.'
+    Assert-That ($comparatorPrompt.Contains($tagJudgmentRequirement)-and$comparatorPrompt-match'exactly one existing tag'-and$comparatorPrompt-match'Do not bundle') 'Comparator prompt omitted the locked replacement-tag judgment contract.'
+    Assert-That ($validatorPrompt.Contains($tagJudgmentRequirement)-and$validatorPrompt-match'exactly one existing tag'-and$validatorPrompt-match'Do not bundle') 'Validator prompt omitted the locked replacement-tag judgment contract.'
     New-Item -ItemType Directory -Path (Join-Path $target 'contracts'),(Join-Path $target '.design'),(Join-Path $target 'tools\ai')|Out-Null
     [IO.File]::WriteAllText((Join-Path $target 'contracts\sample.md'),"# Sample`n`nA generic rule.",[Text.UTF8Encoding]::new($false))
     Set-Content (Join-Path $target 'AI_RULES.md') 'Rules apply. The epic governs review protocol.' -Encoding utf8
@@ -106,14 +108,20 @@ try{
     & pwsh -NoLogo -NoProfile -NonInteractive -File $script:fake;if($LASTEXITCODE-ne0){throw 'Tag-judgment comparator fixture failed.'}
     $tagComparison=Get-Content $tagComparatorOutput -Raw|ConvertFrom-Json;Assert-ContractReviewResponse -Response $tagComparison -Role comparator
     Assert-ContractReviewComparisonAccounting -ReviewerA $tagReviewerA -ReviewerB $tagReviewerB -Comparison $tagComparison
-    Assert-That ($tagComparison.classifications[0].classification-eq'RESOLVED_BY_JUDGMENT'-and$tagComparison.classifications[0].rationale-match'clearer compliant') 'Comparator did not resolve a sensible tag-wording difference by explained judgment.'
+    Assert-That (@($tagComparison.classifications).Count-eq2-and@($tagComparison.classifications|Where-Object{$_.classification-ne'RESOLVED_BY_JUDGMENT'}).Count-eq0-and$tagComparison.classifications[0].rationale-match'clearer compliant') 'Comparator did not keep independent tag-wording judgments separate.'
+    $bundledTagDifferences=$tagComparison|ConvertTo-Json -Depth 32|ConvertFrom-Json;$bundledTagDifferences.classifications[0].reviewerAFindingIds=@('A1','A2');$bundledTagDifferences.classifications[0].reviewerBFindingIds=@('B1','B2');$bundledTagDifferences.classifications=@($bundledTagDifferences.classifications[0])
+    $bundledTagsRejected=$false;try{Assert-ContractReviewComparisonAccounting -ReviewerA $tagReviewerA -ReviewerB $tagReviewerB -Comparison $bundledTagDifferences}catch{$bundledTagsRejected=$_.Exception.Message-match'exactly one existing tag|replacement-tag difference'}
+    Assert-That $bundledTagsRejected 'RESOLVED_BY_JUDGMENT allowed multiple existing tags in one classification.'
+    $fragmentMismatch=$tagReviewerB|ConvertTo-Json -Depth 32|ConvertFrom-Json;$fragmentMismatch.findings[0].placement.fragments[0].end=2
+    $fragmentMismatchRejected=$false;try{Assert-ContractReviewComparisonAccounting -ReviewerA $tagReviewerA -ReviewerB $fragmentMismatch -Comparison $tagComparison}catch{$fragmentMismatchRejected=$_.Exception.Message-match'placement otherwise agrees'}
+    Assert-That $fragmentMismatchRejected 'RESOLVED_BY_JUDGMENT hid a source-fragment boundary difference.'
     $notATagDifference=$tagReviewerB|ConvertTo-Json -Depth 32|ConvertFrom-Json;$notATagDifference.findings[0].placement.proposedTags=@('[server install]')
     $judgmentScopeRejected=$false;try{Assert-ContractReviewComparisonAccounting -ReviewerA $tagReviewerA -ReviewerB $notATagDifference -Comparison $tagComparison}catch{$judgmentScopeRejected=$_.Exception.Message-match'replacement-tag difference'}
     Assert-That $judgmentScopeRejected 'RESOLVED_BY_JUDGMENT escaped its replacement-tag-only scope.'
     $env:CONTRACT_REVIEW_SCHEMA_PATH=$validatorSchemaPath;$env:CONTRACT_REVIEW_ROLE='validator';$env:CONTRACT_REVIEW_ARTIFACT_NAME='validation';$tagValidatorOutput=Join-Path $requests 'tag-judgment-validation.json';$env:CONTRACT_REVIEW_OUTPUT_PATH=$tagValidatorOutput
     & pwsh -NoLogo -NoProfile -NonInteractive -File $script:fake;if($LASTEXITCODE-ne0){throw 'Tag-judgment validator fixture failed.'}
     $tagValidation=Get-Content $tagValidatorOutput -Raw|ConvertFrom-Json;Assert-ContractReviewResponse -Response $tagValidation -Role validator
-    Assert-That ($tagValidation.resolutions[0].outcome-eq'ACCEPT_B'-and@($tagValidation.unresolved).Count-eq0) 'Validator unnecessarily escalated a sensible tag-wording difference to the user.'
+    Assert-That (@($tagValidation.resolutions).Count-eq2-and@($tagValidation.resolutions|Where-Object{$_.outcome-ne'ACCEPT_B'}).Count-eq0-and@($tagValidation.unresolved).Count-eq0) 'Validator unnecessarily escalated or combined independent sensible tag-wording differences.'
     foreach($name in @('CONTRACT_REVIEW_PROMPT_FILE','CONTRACT_REVIEW_OUTPUT_PATH','CONTRACT_REVIEW_SCHEMA_PATH','CONTRACT_REVIEW_ROLE','CONTRACT_REVIEW_ARTIFACT_NAME','CONTRACT_REVIEW_TEST_SCENARIO')){Remove-Item "Env:\$name" -ErrorAction SilentlyContinue}
 
     $env:CONTRACT_REVIEW_CLAUDE_COMMAND=Join-Path $runnerRoot 'tests\fixtures\Fake-StructuredCli.ps1';$env:CONTRACT_REVIEW_CODEX_COMMAND=$env:CONTRACT_REVIEW_CLAUDE_COMMAND
