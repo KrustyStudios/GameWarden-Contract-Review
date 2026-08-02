@@ -2,6 +2,8 @@
 param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-z0-9][a-z0-9-]{2,79}$')][string]$RunId,
     [Parameter(Mandatory = $true)][string]$GuidePath,
+    [Parameter(Mandatory = $true)][string]$RulesPath,
+    [Parameter(Mandatory = $true)][string]$GuardrailsPath,
     [Parameter(Mandatory = $true)][string]$TargetPath,
     [Parameter(Mandatory = $true)][string]$SplitterPath,
     [string]$Approval,
@@ -63,10 +65,18 @@ function Get-ApprovalPhrase {
     $mode = if ($AllCodex) { 'all-codex' } else { 'claude-codex' }
     $lines = @(
         "run=$RunId"
-        "guide=$($State.GuideHash)"
-        "target=$($State.TargetHash)"
-        "watcher=$($State.WatcherHash)"
-        "splitter=$($State.SplitterHash)"
+        "guide-path=$($State.GuidePath)"
+        "guide-hash=$($State.GuideHash)"
+        "rules-path=$($State.RulesPath)"
+        "rules-hash=$($State.RulesHash)"
+        "guardrails-path=$($State.GuardrailsPath)"
+        "guardrails-hash=$($State.GuardrailsHash)"
+        "source-path=$($State.TargetPath)"
+        "source-hash=$($State.TargetHash)"
+        "watcher-path=$($State.WatcherPath)"
+        "watcher-hash=$($State.WatcherHash)"
+        "splitter-path=$($State.SplitterPath)"
+        "splitter-hash=$($State.SplitterHash)"
         "mode=$mode"
         "claude-model=$ClaudeModel"
         "codex-model=$CodexModel"
@@ -82,31 +92,53 @@ function Get-ApprovalPhrase {
 }
 
 function New-RoleDirectory {
-    param([string]$Root, [string]$Name, [byte[]]$GuideBytes, [byte[]]$TargetBytes, [string]$Prompt)
+    param([string]$Root, [string]$Name)
     $directory = Join-Path $Root $Name
     New-Item -ItemType Directory -Path $directory | Out-Null
-    [IO.File]::WriteAllBytes((Join-Path $directory 'GUIDE.md'), $GuideBytes)
-    [IO.File]::WriteAllBytes((Join-Path $directory 'TARGET.md'), $TargetBytes)
-    [IO.File]::WriteAllText((Join-Path $directory 'PROMPT.md'), $Prompt, [Text.UTF8Encoding]::new($false))
     $directory
 }
 
 function New-Prompt {
-    param([string]$Role, [string]$Guide, [string]$Target, [string]$Material = '')
+    param(
+        [string]$Role,
+        [string]$Guide,
+        [string]$Rules,
+        [string]$Guardrails,
+        [string]$Target,
+        [string]$Material = ''
+    )
     @"
 ROLE: $Role
 
-Follow the complete guide below. Use only the guide, target, and role material in this prompt.
-Return only the Markdown report required for this role. Do not use tools or outside context.
+Read each exact input path below in full. Use only those files and the role material in
+this prompt. Use tools only to read the listed files. Do not change an input or inspect
+other files. Return only the Markdown report required for this role.
 
-===== GUIDE =====
-$Guide
-===== TARGET =====
-$Target
+GUIDE PATH: $Guide
+RULES PATH: $Rules
+GUARDRAILS PATH: $Guardrails
+SOURCE CONTRACT PATH: $Target
+
 ===== ROLE MATERIAL =====
 $Material
 ===== END INPUT =====
 "@
+}
+
+function Assert-InputsUnchanged {
+    param([hashtable]$State)
+    foreach ($input in @(
+        @{ Label = 'Guide'; Path = $State.GuidePath; Hash = $State.GuideHash }
+        @{ Label = 'Rules'; Path = $State.RulesPath; Hash = $State.RulesHash }
+        @{ Label = 'Guardrails'; Path = $State.GuardrailsPath; Hash = $State.GuardrailsHash }
+        @{ Label = 'Source'; Path = $State.TargetPath; Hash = $State.TargetHash }
+        @{ Label = 'Watcher'; Path = $State.WatcherPath; Hash = $State.WatcherHash }
+        @{ Label = 'Splitter'; Path = $State.SplitterPath; Hash = $State.SplitterHash }
+    )) {
+        if ((Get-FileHashValue $input.Path) -ne $input.Hash) {
+            throw "$($input.Label) changed during review: $($input.Path)"
+        }
+    }
 }
 
 function Start-RoleProcess {
@@ -117,16 +149,21 @@ function Start-RoleProcess {
         [string]$Prompt,
         [string]$ClaudeCli,
         [string]$CodexCli,
+        [string[]]$InputDirectories,
         [Collections.Generic.List[Diagnostics.Process]]$Processes
     )
     $cli = if ($Provider -eq 'claude') { $ClaudeCli } else { $CodexCli }
     $arguments = [Collections.Generic.List[string]]::new()
     if ($Provider -eq 'claude') {
-        foreach ($argument in @('--model', $ClaudeModel, '--safe-mode', '--setting-sources', '', '--tools', '', '--disable-slash-commands', '--no-session-persistence', '--no-chrome', '--permission-mode', 'dontAsk', '--output-format', 'text', '--print')) {
+        foreach ($argument in @('--model', $ClaudeModel, '--safe-mode', '--setting-sources', '', '--tools', 'Read', '--disable-slash-commands', '--no-session-persistence', '--no-chrome', '--permission-mode', 'dontAsk', '--output-format', 'text', '--print')) {
             $arguments.Add($argument)
         }
+        foreach ($inputDirectory in $InputDirectories) {
+            $arguments.Add('--add-dir')
+            $arguments.Add($inputDirectory)
+        }
     } else {
-        foreach ($argument in @('exec', '--model', $CodexModel, '--config', "model_reasoning_effort=`"$CodexReasoningEffort`"", '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--strict-config', '--disable', 'shell_tool', '--disable', 'unified_exec', '--output-last-message', (Join-Path $Directory 'REPORT.md'), '-')) {
+        foreach ($argument in @('exec', '--model', $CodexModel, '--config', "model_reasoning_effort=`"$CodexReasoningEffort`"", '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--strict-config', '--output-last-message', (Join-Path $Directory 'REPORT.md'), '-')) {
             $arguments.Add($argument)
         }
     }
@@ -230,8 +267,8 @@ function Wait-ParallelRoles {
 }
 
 function Invoke-OneRole {
-    param([string]$Provider, [string]$Slot, [string]$Directory, [string]$Prompt, [string]$ClaudeCli, [string]$CodexCli)
-    $role = Start-RoleProcess $Provider $Slot $Directory $Prompt $ClaudeCli $CodexCli $activeProcesses
+    param([string]$Provider, [string]$Slot, [string]$Directory, [string]$Prompt, [string]$ClaudeCli, [string]$CodexCli, [string[]]$InputDirectories)
+    $role = Start-RoleProcess $Provider $Slot $Directory $Prompt $ClaudeCli $CodexCli $InputDirectories $activeProcesses
     $deadline = [DateTime]::UtcNow.AddSeconds($RoleTimeoutSeconds)
     while (-not $role.Process.HasExited) {
         if ([DateTime]::UtcNow -gt $deadline) { Stop-RoleProcess $role; throw "$Slot timed out after $RoleTimeoutSeconds seconds." }
@@ -256,8 +293,10 @@ function Write-Receipt {
 - Run: $RunId
 - Status: $Status
 - Guide: $($State.GuidePath) — $($State.GuideHash)
+- Rules: $($State.RulesPath) — $($State.RulesHash)
+- Guardrails: $($State.GuardrailsPath) — $($State.GuardrailsHash)
 - Source: $($State.TargetPath) — $($State.TargetHash)
-- Watcher: $($State.WatcherHash)
+- Watcher: $($State.WatcherPath) — $($State.WatcherHash)
 - Splitter: $($State.SplitterPath) — $($State.SplitterHash)
 - Mode: $mode
 - Claude model: $ClaudeModel
@@ -273,19 +312,24 @@ $($artifactLines -join "`n")
 }
 
 $guide = Resolve-LeafPath $GuidePath 'Guide'
+$rules = Resolve-LeafPath $RulesPath 'Rules'
+$guardrails = Resolve-LeafPath $GuardrailsPath 'Guardrails'
 $target = Resolve-LeafPath $TargetPath 'Target'
 $splitter = Resolve-LeafPath $SplitterPath 'Splitter'
 $watcher = (Resolve-Path -LiteralPath $PSCommandPath).Path
 $codexCli = Resolve-CommandPath $CodexCommand 'Codex'
 $claudeCli = if ($AllCodex) { $codexCli } else { Resolve-CommandPath $ClaudeCommand 'Claude' }
-$guideBytes = [IO.File]::ReadAllBytes($guide)
-$targetBytes = [IO.File]::ReadAllBytes($target)
 $state = @{
     GuidePath = $guide
+    RulesPath = $rules
+    GuardrailsPath = $guardrails
     TargetPath = $target
     SplitterPath = $splitter
-    GuideHash = Get-BytesHash $guideBytes
-    TargetHash = Get-BytesHash $targetBytes
+    WatcherPath = $watcher
+    GuideHash = Get-FileHashValue $guide
+    RulesHash = Get-FileHashValue $rules
+    GuardrailsHash = Get-FileHashValue $guardrails
+    TargetHash = Get-FileHashValue $target
     SplitterHash = Get-FileHashValue $splitter
     WatcherHash = Get-FileHashValue $watcher
     ClaudeCommand = if ($AllCodex) { 'not-used' } else { $claudeCli }
@@ -293,6 +337,7 @@ $state = @{
     CodexCommand = $codexCli
     CodexCommandHash = Get-FileHashValue $codexCli
 }
+$inputDirectories = @(@($guide, $rules, $guardrails, $target) | ForEach-Object { Split-Path -Parent $_ } | Sort-Object -Unique)
 $expectedApproval = Get-ApprovalPhrase $state
 if ($ShowApproval) { Write-Output $expectedApproval; exit 0 }
 if ($Approval -cne $expectedApproval) { throw "Approval mismatch. Run with -ShowApproval and use the exact printed phrase." }
@@ -306,24 +351,24 @@ $status = 'FAILED'
 $failure = $null
 
 try {
-    $guideText = $utf8.GetString($guideBytes)
-    $targetText = $utf8.GetString($targetBytes)
-    $blindPrompt = New-Prompt 'BLIND REVIEWER' $guideText $targetText
-    $blindA = New-RoleDirectory $privateRoot 'blind-a' $guideBytes $targetBytes $blindPrompt
-    $blindB = New-RoleDirectory $privateRoot 'blind-b' $guideBytes $targetBytes $blindPrompt
+    $blindPrompt = New-Prompt 'BLIND REVIEWER' $guide $rules $guardrails $target
+    $blindA = New-RoleDirectory $privateRoot 'blind-a'
+    $blindB = New-RoleDirectory $privateRoot 'blind-b'
     $providerA = if ($AllCodex) { 'codex' } else { 'claude' }
     Write-Host "Starting blind reviewers concurrently ($providerA + codex)..."
-    $roleA = Start-RoleProcess $providerA 'blind-A' $blindA $blindPrompt $claudeCli $codexCli $activeProcesses
-    $roleB = Start-RoleProcess 'codex' 'blind-B' $blindB $blindPrompt $claudeCli $codexCli $activeProcesses
+    $roleA = Start-RoleProcess $providerA 'blind-A' $blindA $blindPrompt $claudeCli $codexCli $inputDirectories $activeProcesses
+    $roleB = Start-RoleProcess 'codex' 'blind-B' $blindB $blindPrompt $claudeCli $codexCli $inputDirectories $activeProcesses
     $blindResults = Wait-ParallelRoles $roleA $roleB $runDirectory @('OK', 'BLOCKED')
+    Assert-InputsUnchanged $state
     Write-AtomicText (Join-Path $runDirectory 'review-a.md') $blindResults[0].Report
     Write-AtomicText (Join-Path $runDirectory 'review-b.md') $blindResults[1].Report
 
     Write-Host 'Starting Codex comparator...'
     $comparisonMaterial = "===== REVIEW A =====`n$($blindResults[0].Report)===== REVIEW B =====`n$($blindResults[1].Report)"
-    $comparisonPrompt = New-Prompt 'COMPARATOR' $guideText $targetText $comparisonMaterial
-    $comparisonDir = New-RoleDirectory $privateRoot 'comparator' $guideBytes $targetBytes $comparisonPrompt
-    $comparison = Invoke-OneRole 'codex' 'comparator' $comparisonDir $comparisonPrompt $claudeCli $codexCli
+    $comparisonPrompt = New-Prompt 'COMPARATOR' $guide $rules $guardrails $target $comparisonMaterial
+    $comparisonDir = New-RoleDirectory $privateRoot 'comparator'
+    $comparison = Invoke-OneRole 'codex' 'comparator' $comparisonDir $comparisonPrompt $claudeCli $codexCli $inputDirectories
+    Assert-InputsUnchanged $state
     if ($comparison.Status -ne 'OK') { throw "Comparator returned unexpected status: $($comparison.Status)" }
     Write-AtomicText (Join-Path $runDirectory 'comparison.md') $comparison.Report
     $proofMatch = [regex]::Match($comparison.Report, '(?s)BEGIN PROOF REQUESTS\s*(.*?)\s*END PROOF REQUESTS')
@@ -335,13 +380,14 @@ try {
         $proofBReport = $proofAReport
     } else {
         Write-Host 'Starting proof reviewers concurrently...'
-        $proofPromptA = New-Prompt 'PROOF REVIEWER A' $guideText $targetText "===== OWN REVIEW (SIDE A) =====`n$($blindResults[0].Report)===== PROOF REQUESTS =====`n$proofRequests"
-        $proofPromptB = New-Prompt 'PROOF REVIEWER B' $guideText $targetText "===== OWN REVIEW (SIDE B) =====`n$($blindResults[1].Report)===== PROOF REQUESTS =====`n$proofRequests"
-        $proofDirA = New-RoleDirectory $privateRoot 'proof-a' $guideBytes $targetBytes $proofPromptA
-        $proofDirB = New-RoleDirectory $privateRoot 'proof-b' $guideBytes $targetBytes $proofPromptB
-        $proofRoleA = Start-RoleProcess $providerA 'proof-A' $proofDirA $proofPromptA $claudeCli $codexCli $activeProcesses
-        $proofRoleB = Start-RoleProcess 'codex' 'proof-B' $proofDirB $proofPromptB $claudeCli $codexCli $activeProcesses
+        $proofPromptA = New-Prompt 'PROOF REVIEWER A' $guide $rules $guardrails $target "===== OWN REVIEW (SIDE A) =====`n$($blindResults[0].Report)===== PROOF REQUESTS =====`n$proofRequests"
+        $proofPromptB = New-Prompt 'PROOF REVIEWER B' $guide $rules $guardrails $target "===== OWN REVIEW (SIDE B) =====`n$($blindResults[1].Report)===== PROOF REQUESTS =====`n$proofRequests"
+        $proofDirA = New-RoleDirectory $privateRoot 'proof-a'
+        $proofDirB = New-RoleDirectory $privateRoot 'proof-b'
+        $proofRoleA = Start-RoleProcess $providerA 'proof-A' $proofDirA $proofPromptA $claudeCli $codexCli $inputDirectories $activeProcesses
+        $proofRoleB = Start-RoleProcess 'codex' 'proof-B' $proofDirB $proofPromptB $claudeCli $codexCli $inputDirectories $activeProcesses
         $proofResults = Wait-ParallelRoles $proofRoleA $proofRoleB $runDirectory @('OK', 'BLOCKED')
+        Assert-InputsUnchanged $state
         $proofAReport = $proofResults[0].Report
         $proofBReport = $proofResults[1].Report
     }
@@ -350,9 +396,10 @@ try {
 
     Write-Host 'Starting Codex final validator...'
     $validationMaterial = "===== REVIEW A =====`n$($blindResults[0].Report)===== REVIEW B =====`n$($blindResults[1].Report)===== COMPARISON =====`n$($comparison.Report)===== PROOF A =====`n$proofAReport===== PROOF B =====`n$proofBReport"
-    $validationPrompt = New-Prompt 'FINAL VALIDATOR' $guideText $targetText $validationMaterial
-    $validationDir = New-RoleDirectory $privateRoot 'validator' $guideBytes $targetBytes $validationPrompt
-    $validation = Invoke-OneRole 'codex' 'validator' $validationDir $validationPrompt $claudeCli $codexCli
+    $validationPrompt = New-Prompt 'FINAL VALIDATOR' $guide $rules $guardrails $target $validationMaterial
+    $validationDir = New-RoleDirectory $privateRoot 'validator'
+    $validation = Invoke-OneRole 'codex' 'validator' $validationDir $validationPrompt $claudeCli $codexCli $inputDirectories
+    Assert-InputsUnchanged $state
     Write-AtomicText (Join-Path $runDirectory 'final-report.md') $validation.Report
     if ($validation.Status -eq 'USER_DECISION_REQUIRED') { $status = $validation.Status }
     elseif ($validation.Status -eq 'COMPLETE') {
@@ -360,10 +407,11 @@ try {
         if (-not $manifestMatch.Success -or [string]::IsNullOrWhiteSpace($manifestMatch.Groups[1].Value)) { throw 'Final validator omitted the Stage 1 manifest.' }
         $manifestPath = Join-Path $runDirectory 'stage1-manifest.tsv'
         Write-AtomicText $manifestPath ($manifestMatch.Groups[1].Value.Trim() + "`n")
-        if ((Get-FileHashValue $guide) -ne $state.GuideHash -or (Get-FileHashValue $target) -ne $state.TargetHash) { throw 'Guide or source changed during review.' }
-        $checkLog = @(& $splitter -Source $target -Manifest $manifestPath -OutDir (Join-Path $runDirectory 'staging') -CheckOnly 2>&1)
+        Assert-InputsUnchanged $state
+        $checkLog = @(& $splitter -Source $target -Manifest $manifestPath -OutDir (Join-Path $runDirectory 'staging') -CheckOnly 6>&1 2>&1)
         Write-AtomicText (Join-Path $runDirectory 'splitter-check.txt') (($checkLog -join "`n").TrimEnd() + "`n")
-        $stageLog = @(& $splitter -Source $target -Manifest $manifestPath -OutDir (Join-Path $runDirectory 'staging') 2>&1)
+        Assert-InputsUnchanged $state
+        $stageLog = @(& $splitter -Source $target -Manifest $manifestPath -OutDir (Join-Path $runDirectory 'staging') 6>&1 2>&1)
         Write-AtomicText (Join-Path $runDirectory 'splitter-stage.txt') (($stageLog -join "`n").TrimEnd() + "`n")
         $status = 'COMPLETE'
     } else { throw "Final validator returned unexpected status: $($validation.Status)" }
@@ -380,8 +428,9 @@ try {
     }
     try { Remove-Item -LiteralPath $privateRoot -Recurse -Force -ErrorAction Stop }
     catch { $failure = (($failure, "Cleanup failed: $($_.Exception.Message)" | Where-Object { $_ }) -join "`n"); $status = 'FAILED' }
-    if ((Get-FileHashValue $guide) -ne $state.GuideHash -or (Get-FileHashValue $target) -ne $state.TargetHash) {
-        $failure = (($failure, 'Guide or source changed during review.' | Where-Object { $_ }) -join "`n")
+    try { Assert-InputsUnchanged $state }
+    catch {
+        $failure = (($failure, $_.Exception.Message | Where-Object { $_ }) -join "`n")
         $status = 'FAILED'
     }
 }

@@ -8,12 +8,25 @@ $logRoot = [Environment]::GetEnvironmentVariable('CONTRACT_REVIEW_FAKE_LOG_DIR')
 $scenario = [Environment]::GetEnvironmentVariable('CONTRACT_REVIEW_FAKE_SCENARIO')
 if ([string]::IsNullOrWhiteSpace($logRoot)) { throw 'CONTRACT_REVIEW_FAKE_LOG_DIR is required.' }
 if ([string]::IsNullOrWhiteSpace($slot)) { $slot = 'unknown' }
+if (@(Get-ChildItem -LiteralPath (Get-Location).Path -File -Force).Count -ne 0) {
+    throw 'Private output directory contained copied input files.'
+}
 
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 [IO.File]::WriteAllText((Join-Path $logRoot "$slot.prompt.md"), $prompt, [Text.UTF8Encoding]::new($false))
-[IO.File]::WriteAllBytes((Join-Path $logRoot "$slot.GUIDE.md"), [IO.File]::ReadAllBytes((Join-Path (Get-Location) 'GUIDE.md')))
-[IO.File]::WriteAllBytes((Join-Path $logRoot "$slot.TARGET.md"), [IO.File]::ReadAllBytes((Join-Path (Get-Location) 'TARGET.md')))
+[IO.File]::WriteAllText((Join-Path $logRoot "$slot.cwd.txt"), (Get-Location).Path, [Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $logRoot "$slot.start"), [DateTime]::UtcNow.ToString('o'), [Text.UTF8Encoding]::new($false))
+
+$inputPaths = [ordered]@{}
+foreach ($label in @('GUIDE', 'RULES', 'GUARDRAILS', 'SOURCE CONTRACT')) {
+    $match = [regex]::Match($prompt, "(?m)^$([regex]::Escape($label)) PATH: (.+)$")
+    if (-not $match.Success) { throw "Prompt omitted $label PATH." }
+    $inputPath = $match.Groups[1].Value.TrimEnd("`r")
+    if (-not (Test-Path -LiteralPath $inputPath -PathType Leaf)) { throw "$label input does not exist: $inputPath" }
+    [void][IO.File]::ReadAllBytes($inputPath)
+    $inputPaths[$label] = $inputPath
+}
+[IO.File]::WriteAllText((Join-Path $logRoot "$slot.input-paths.txt"), (($inputPaths.Values -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
 
 if ($slot -like 'blind-*') {
     $deadline = [DateTime]::UtcNow.AddSeconds(5)
@@ -34,13 +47,18 @@ if ($slot -like 'blind-*') {
     }
 }
 
-$lineCount = [IO.File]::ReadAllLines((Join-Path (Get-Location) 'TARGET.md')).Count
+$sourcePath = $inputPaths['SOURCE CONTRACT']
+$lineCount = [IO.File]::ReadAllLines($sourcePath).Count
+$contractsMarker = "$([IO.Path]::DirectorySeparatorChar)contracts$([IO.Path]::DirectorySeparatorChar)"
+$contractsIndex = $sourcePath.IndexOf($contractsMarker, [StringComparison]::OrdinalIgnoreCase)
+if ($contractsIndex -lt 0) { throw "Source path is not under contracts/: $sourcePath" }
+$destination = $sourcePath.Substring($contractsIndex + 1).Replace('\', '/')
 $report = switch -Wildcard ($slot) {
     'blind-A' {
-        "STATUS: OK`n# Blind review`nFinding count: 1`n`n## A1`nSource lines: 1-$lineCount`nSource tag: NONE`nDisposition: MOVE`nDestination: contracts/example_CONTRACT.md`nProposed tag: [example]`nReason: complete source`nEvidence: # Example`n`n# Candidate Stage 1 manifest`n1-$lineCount`tcontracts/example_CONTRACT.md`texample`tMOVE`t[example]`n"
+        "STATUS: OK`n# Blind review`nFinding count: 1`n`n## A1`nSource lines: 1-$lineCount`nSource tag: [EXAMPLE-RULE]`nDisposition: MOVE`nDestination: $destination`nProposed tag: [example]`nReason: complete source`nEvidence: [EXAMPLE-RULE]`n`n# Candidate Stage 1 manifest`n1-$lineCount`t$destination`texample`tMOVE`t[example]`n"
     }
     'blind-B' {
-        "STATUS: OK`n# Blind review`nFinding count: 2`n`n## B1`nSource lines: 1-1`nSource tag: NONE`nDisposition: MOVE`nDestination: contracts/example_CONTRACT.md`nProposed tag: [example heading]`nReason: heading`nEvidence: # Example`n`n## B2`nSource lines: 2-$lineCount`nSource tag: NONE`nDisposition: MOVE`nDestination: contracts/example_CONTRACT.md`nProposed tag: [example body]`nReason: body`nEvidence: alpha`n`n# Candidate Stage 1 manifest`n1-1`tcontracts/example_CONTRACT.md`texample heading`tMOVE`t[example heading]`n2-$lineCount`tcontracts/example_CONTRACT.md`texample body`tMOVE`t[example body]`n"
+        "STATUS: OK`n# Blind review`nFinding count: 2`n`n## B1`nSource lines: 1-1`nSource tag: NONE`nDisposition: MOVE`nDestination: $destination`nProposed tag: [example heading]`nReason: heading`nEvidence: # Example`n`n## B2`nSource lines: 2-$lineCount`nSource tag: [EXAMPLE-RULE]`nDisposition: MOVE`nDestination: $destination`nProposed tag: [example body]`nReason: body`nEvidence: [EXAMPLE-RULE]`n`n# Candidate Stage 1 manifest`n1-1`t$destination`texample heading`tMOVE`t[example heading]`n2-$lineCount`t$destination`texample body`tMOVE`t[example body]`n"
     }
     'comparator' {
         "STATUS: OK`n# Comparison`n## Inventory and granularity`nA has 1 finding; B has 2. They have different finding counts and split the same source differently.`n## Agreements`nThe whole source moves to the same destination.`n## Differences and resolutions`nGranularity needs source proof.`nBEGIN PROOF REQUESTS`nA:A1 and B:B1/B2 must prove their source boundaries.`nEND PROOF REQUESTS`n"
@@ -49,7 +67,7 @@ $report = switch -Wildcard ($slot) {
         "STATUS: OK`n# Proof response`n## boundary`nResult: PROVED`nEvidence: # Example and the complete source.`n"
     }
     'validator' {
-        "STATUS: COMPLETE`n# Final validation`n## Resolutions`nUse one complete-source move.`n## User decisions`nNONE`nBEGIN STAGE1 MANIFEST`n1-$lineCount`tcontracts/example_CONTRACT.md`texample`tMOVE`t[example]`nEND STAGE1 MANIFEST`n"
+        "STATUS: COMPLETE`n# Final validation`n## Resolutions`nUse one complete-source move.`n## User decisions`nNONE`nBEGIN STAGE1 MANIFEST`n1-$lineCount`t$destination`texample`tMOVE`t[example]`nEND STAGE1 MANIFEST`n"
     }
     default { throw "Unexpected test slot: $slot" }
 }
