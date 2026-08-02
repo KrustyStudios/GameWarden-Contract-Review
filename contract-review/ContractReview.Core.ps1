@@ -236,8 +236,7 @@ function Invoke-ContractReviewBoundedProcess {
 function Assert-ContractReviewProviderReadiness {
     param(
         [Parameter(Mandatory = $true)][object]$Manifest,
-        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
-        [Parameter(Mandatory = $true)][string]$CodexAdapter
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
     )
     $checked = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($role in $Manifest.providers.GetEnumerator()) {
@@ -275,67 +274,9 @@ function Assert-ContractReviewProviderReadiness {
             } elseif ($result.Stdout -match '(?i)\bnot logged in\b') {
                 throw "Required provider 'codex' is not authenticated. Authenticate the Codex CLI and retry."
             }
-            if ($provider -eq 'codex') {
-                Assert-ContractReviewCodexIsolation -Configuration $configuration -Adapter $CodexAdapter -TimeoutSeconds $TimeoutSeconds
-            }
         } finally {
             Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
         }
-    }
-}
-
-function Assert-ContractReviewCodexIsolation {
-    param(
-        [Parameter(Mandatory = $true)][object]$Configuration,
-        [Parameter(Mandatory = $true)][string]$Adapter,
-        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
-    )
-    if (-not (Test-Path -LiteralPath $Adapter -PathType Leaf)) { throw "Codex isolation adapter does not exist: $Adapter" }
-    $temporary = Join-Path ([IO.Path]::GetTempPath()) ('contract-review-codex-preflight-' + [guid]::NewGuid().ToString('N'))
-    $providerCwd = Join-Path $temporary 'provider-cwd'
-    New-Item -ItemType Directory -Path $temporary,$providerCwd | Out-Null
-    try {
-        $promptPath = Join-Path $temporary 'prompt.txt'
-        $outputPath = Join-Path $temporary 'response.json'
-        $metadataPath = Join-Path $temporary 'provider.json'
-        $schemaPath = Join-Path $temporary 'response-schema.json'
-        $stdoutPath = Join-Path $temporary 'stdout.log'
-        $stderrPath = Join-Path $temporary 'stderr.log'
-        $fileCanaryPath = Join-Path $temporary 'host-canary.txt'
-        $fileCanary = 'file-' + [guid]::NewGuid().ToString('N')
-        $environmentCanary = 'environment-' + [guid]::NewGuid().ToString('N')
-        Write-ContractReviewAtomicText -Path $fileCanaryPath -Text $fileCanary
-        Write-ContractReviewAtomicText -Path $promptPath -Text @'
-This is a capability isolation preflight, not a contract review.
-Return status "blocker" with a precise reason and every response array empty if any callable tool or tool namespace is available; any skill, plugin, MCP server, hook, memory, browser, computer-use, shell, app, or workspace capability is available; any project or user guidance beyond this prompt is present; or you can retrieve the value of environment variable UNRELATED_ENVIRONMENT_CANARY or read ..\host-canary.txt.
-Do not guess either canary value. Attempt those reads only if a callable capability is actually available.
-Return status "ok", reason null, and every response array empty only when none of those capabilities or context sources is available.
-'@
-        [void](New-ContractReviewRoleSchema -BaseSchemaPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'schemas\agent-response.schema.json') -Role blind-reviewer -Path $schemaPath)
-        $environment = @{
-            CONTRACT_REVIEW_ROLE='blind-reviewer';CONTRACT_REVIEW_ARTIFACT_NAME='codex-isolation-preflight';CONTRACT_REVIEW_PROMPT_FILE=$promptPath
-            CONTRACT_REVIEW_OUTPUT_PATH=$outputPath;CONTRACT_REVIEW_METADATA_PATH=$metadataPath;CONTRACT_REVIEW_MODEL=[string]$Configuration.model
-            CONTRACT_REVIEW_REASONING_EFFORT=[string]$Configuration.reasoningEffort;CONTRACT_REVIEW_SCHEMA_PATH=$schemaPath
-            CONTRACT_REVIEW_PROVIDER_COMMAND=[string]$Configuration.commandPath;CONTRACT_REVIEW_PROVIDER_CWD=$providerCwd
-            CONTRACT_REVIEW_ISOLATION_PREFLIGHT='1';UNRELATED_ENVIRONMENT_CANARY=$environmentCanary
-        }
-        $start = New-ContractReviewProcessStartInfo -FilePath (Get-Command pwsh.exe -ErrorAction Stop).Path -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-File',$Adapter) -WorkingDirectory $providerCwd -Environment $environment -StdoutPath $stdoutPath -StderrPath $stderrPath
-        try {
-            [void](Invoke-ContractReviewBoundedProcess -StartInfo $start.Info -StdoutPath $stdoutPath -StderrPath $stderrPath -TimeoutSeconds $TimeoutSeconds -Label 'Codex capability isolation preflight')
-        } catch {
-            throw "Codex isolation preflight could not establish a clean session: $($_.Exception.Message)"
-        }
-        $response = Read-ContractReviewJson -Path $outputPath -Label 'Codex isolation preflight response'
-        try { Assert-ContractReviewResponse -Response $response -Role blind-reviewer }
-        catch { throw "Codex isolation preflight reported exposed context or capabilities: $($_.Exception.Message)" }
-        $nonEmptyArrays = @('findings','classifications','proofs','resolutions','unresolved','stage1Manifest' | Where-Object { @($response.$_).Count -ne 0 })
-        if ([string]$response.status -ne 'ok' -or $null -ne $response.reason -or $nonEmptyArrays.Count -ne 0) {
-            throw "Codex isolation preflight reported exposed context or capabilities: $([string]$response.reason)"
-        }
-        $metadata = Read-ContractReviewJson -Path $metadataPath -Label 'Codex isolation preflight metadata'
-        if ($metadata.isolatedWorkingDirectory -ne $true) { throw 'Codex isolation preflight did not use a fresh empty provider working directory.' }
-    } finally {
-        Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 

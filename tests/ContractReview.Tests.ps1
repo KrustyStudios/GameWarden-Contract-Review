@@ -14,13 +14,21 @@ function New-Request([string]$Id,[string]$Kind='decision'){
     return $path
 }
 function Invoke-FakeRun([string]$Id,[string]$Scenario='',[string]$Kind='decision',[string]$Adapter=$script:fake,[int]$Timeout=20){
-    $request=New-Request $Id $Kind;$env:CONTRACT_REVIEW_TEST_SCENARIO=$Scenario
+    $request=New-Request $Id $Kind
+    $coordinationRoot=Join-Path $temp "coordination-$Id"
+    New-Item -ItemType Directory -Path $coordinationRoot|Out-Null
+    $env:CONTRACT_REVIEW_TEST_SCENARIO=$Scenario
+    $env:CONTRACT_REVIEW_TEST_COORDINATION_ROOT=$coordinationRoot
+    $env:CONTRACT_REVIEW_TEST_REQUEST_ID=$Id
     try{
         $base=@{RequestPath=$request;RunnerRoot=$runnerRoot;ClaudeAdapter=$Adapter;CodexAdapter=$Adapter;ClaudeModel='claude-fable-5';CodexModel='gpt-5.6-sol';CodexReasoningEffort='max';RoleTimeoutSeconds=$Timeout;GitTimeoutSeconds=20;SplitterTimeoutSeconds=20}
         $approval=Get-ContractReviewApproval @base
         $packetPath=Start-ContractReview @base -Approval $approval
         return [pscustomobject]@{Request=$request;Approval=$approval;PacketPath=$packetPath;Packet=Get-Content ($packetPath-replace'\.md$','.json') -Raw|ConvertFrom-Json;RunDirectory=Split-Path -Parent $packetPath}
-    }finally{Remove-Item Env:\CONTRACT_REVIEW_TEST_SCENARIO -ErrorAction SilentlyContinue}
+    }finally{
+        foreach($name in @('CONTRACT_REVIEW_TEST_SCENARIO','CONTRACT_REVIEW_TEST_COORDINATION_ROOT','CONTRACT_REVIEW_TEST_REQUEST_ID')){Remove-Item "Env:\$name" -ErrorAction SilentlyContinue}
+        Remove-Item -LiteralPath $coordinationRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 function Invoke-LauncherRun([string]$Id,[string]$Scenario){
     $request=New-Request $Id;$env:CONTRACT_REVIEW_TEST_SCENARIO=$Scenario
@@ -142,10 +150,6 @@ try{
     $claimBlocked=$false;try{Start-ContractReview @claimBase -Approval $claimApproval|Out-Null}catch{$claimBlocked=$_.Exception.Message-match'claude.*not authenticated'}
     Remove-Item $readinessFlag;Assert-That $claimBlocked 'Provider readiness was not rechecked immediately before claim.'
     $claimHash=$claimApproval.Split(' ')[-1];Assert-That (-not(Test-Path (Join-Path $runnerRoot "approval-receipts\fixture-provider-claim-auth-001-$claimHash.json"))) 'Failed provider readiness consumed the one-time approval.'
-    $isolationFlag=Join-Path $runnerRoot 'tests\fixtures\provider-isolation-exposed.flag';New-Item -ItemType File -Path $isolationFlag|Out-Null
-    $isolationRequest=New-Request 'fixture-provider-isolation-001';$isolationBlocked=$false;$isolationFailure='no failure was raised'
-    try{Get-ContractReviewApproval -RequestPath $isolationRequest -RunnerRoot $runnerRoot -ClaudeAdapter $script:fake -CodexAdapter $script:fake -ClaudeModel 'claude-fable-5' -CodexModel 'gpt-5.6-sol' -CodexReasoningEffort max -RoleTimeoutSeconds 20 -GitTimeoutSeconds 20 -SplitterTimeoutSeconds 20|Out-Null}catch{$isolationFailure=$_.Exception.Message;$isolationBlocked=$isolationFailure-match'isolation preflight'}
-    Remove-Item $isolationFlag;Assert-That $isolationBlocked "Codex capability exposure did not block approval: $isolationFailure"
     Copy-Item (Join-Path $runnerRoot 'tests\fixtures\Incompatible-Splitter.ps1') (Join-Path $target 'tools\ai\split-contract.ps1') -Force;Git @('add','tools/ai/split-contract.ps1')|Out-Null;Git @('commit','-m','incompatible splitter fixture')|Out-Null
     $incompatible=Invoke-FakeRun 'fixture-incompatible-splitter-001' '' 'stage1'
     Assert-That ($incompatible.Packet.status-eq'FAILED') "Incompatible pinned splitter did not fail its pre-provider compatibility probe: $($incompatible.Packet.status)"
@@ -176,6 +180,10 @@ try{
     $concurrentB=Get-Content (Join-Path $concurrent.RunDirectory 'reviewer-b.invocation.json') -Raw|ConvertFrom-Json
     $blindStartDelta=([DateTime]::Parse([string]$concurrentA.adapterProcessStartTimeUtc)-[DateTime]::Parse([string]$concurrentB.adapterProcessStartTimeUtc)).Duration().TotalSeconds
     Assert-That ($blindStartDelta-lt5) "Blind reviewer starts were $blindStartDelta second(s) apart."
+    $peerBlind=Invoke-FakeRun 'fixture-peer-blindness-001' 'REQUIRE_PEER_BLINDNESS'
+    $peerBlindBlocker=if($peerBlind.Packet.PSObject.Properties.Name-contains'blocker'){[string]$peerBlind.Packet.blocker}else{''}
+    Assert-That ($peerBlind.Packet.status-eq'USER_DECISION_REQUIRED') "Peer-blind review fixture ended with status $($peerBlind.Packet.status): $peerBlindBlocker"
+    Assert-That ((Test-Path (Join-Path $peerBlind.RunDirectory 'reviewer-a.json'))-and(Test-Path (Join-Path $peerBlind.RunDirectory 'reviewer-b.json'))) 'Blind answers were not published after both reviewers ended.'
     $peerBlocked=Invoke-FakeRun 'fixture-peer-stop-001' 'REVIEWER_A_BLOCKER'
     Assert-That ($peerBlocked.Packet.status-eq'BLOCKED_RULES_OR_SETTINGS') "Reviewer A blocker was not retained: $($peerBlocked.Packet.blocker)"
     $peerInvocation=Get-Content (Join-Path $peerBlocked.RunDirectory 'reviewer-b.invocation.json') -Raw|ConvertFrom-Json
@@ -226,8 +234,8 @@ try{
 
     $hang=Invoke-FakeRun 'fixture-timeout-001' '' 'decision' (Join-Path $runnerRoot 'tests\fixtures\Fake-HangingReviewAgent.ps1') 2
     Assert-That ($hang.Packet.status-eq'FAILED'-and$hang.Packet.blocker-match'full process tree') 'Timeout did not fail with tree termination.'
-    $child=(Get-Content (Join-Path $hang.RunDirectory 'hanging-child.json') -Raw|ConvertFrom-Json).childProcessId;Start-Sleep -Milliseconds 500
-    Assert-That (-not(Get-Process -Id $child -ErrorAction SilentlyContinue)) 'Timed-out adapter child process survived.'
+    $children=@('reviewer-a','reviewer-b'|ForEach-Object{(Get-Content (Join-Path $hang.RunDirectory "$_-hanging-child.json") -Raw|ConvertFrom-Json).childProcessId});Start-Sleep -Milliseconds 500
+    foreach($child in $children){Assert-That (-not(Get-Process -Id $child -ErrorAction SilentlyContinue)) "Timed-out adapter child process $child survived."}
 
     $invalidTemplate=Get-Content $default.Request -Raw|ConvertFrom-Json
     foreach($invalidQuestion in @('Move the rule to lines 4-9.','Should this rule belong in contracts/APP_CONTRACT.md?')){

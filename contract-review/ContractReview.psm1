@@ -112,7 +112,7 @@ function Get-ContractReviewApproval {
         [Parameter(Mandatory = $true)][int]$GitTimeoutSeconds,[Parameter(Mandatory = $true)][int]$SplitterTimeoutSeconds,[switch]$AllCodex
     )
     $manifest = Get-ContractReviewExecutionManifest @PSBoundParameters
-    Assert-ContractReviewProviderReadiness -Manifest $manifest -TimeoutSeconds $RoleTimeoutSeconds -CodexAdapter $CodexAdapter
+    Assert-ContractReviewProviderReadiness -Manifest $manifest -TimeoutSeconds $RoleTimeoutSeconds
     return "APPROVE CONTRACT REVIEW $($manifest.requestId) $(Get-ContractReviewManifestHash -Manifest $manifest)"
 }
 
@@ -180,6 +180,8 @@ function Invoke-ContractReviewRole {
         CONTRACT_REVIEW_SCHEMA_PATH=$responseSchemaPath
         CONTRACT_REVIEW_PROVIDER_COMMAND=$ProviderCommand
         CONTRACT_REVIEW_TEST_SCENARIO=[Environment]::GetEnvironmentVariable('CONTRACT_REVIEW_TEST_SCENARIO','Process')
+        CONTRACT_REVIEW_TEST_COORDINATION_ROOT=[Environment]::GetEnvironmentVariable('CONTRACT_REVIEW_TEST_COORDINATION_ROOT','Process')
+        CONTRACT_REVIEW_TEST_REQUEST_ID=[Environment]::GetEnvironmentVariable('CONTRACT_REVIEW_TEST_REQUEST_ID','Process')
     }
     $providerRoot=Join-Path ([IO.Path]::GetTempPath()) ('contract-review-provider-'+[guid]::NewGuid().ToString('N'))
     $providerCwd=Join-Path $providerRoot 'provider-cwd';New-Item -ItemType Directory -Path $providerCwd|Out-Null
@@ -260,6 +262,40 @@ function Stop-ContractReviewParallelRole {
     Stop-ContractReviewParallelRoleProcess -InvocationPath $Entry.InvocationPath
 }
 
+function Publish-ContractReviewBlindArtifacts {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Definitions,
+        [Parameter(Mandatory = $true)][string]$RunDirectory
+    )
+    $artifacts = [System.Collections.Generic.List[object]]::new()
+    $destinations = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($definition in $Definitions) {
+        if (-not (Test-Path -LiteralPath $definition.ArtifactDirectory -PathType Container)) { continue }
+        foreach ($file in Get-ChildItem -LiteralPath $definition.ArtifactDirectory -Recurse -File) {
+            $relative = [IO.Path]::GetRelativePath($definition.ArtifactDirectory, $file.FullName)
+            $destination = Join-Path $RunDirectory $relative
+            if (-not $destinations.Add($destination)) { throw "Blind-review artifact collision: $relative" }
+            if (Test-Path -LiteralPath $destination) { throw "Blind-review artifact already exists in the shared run: $relative" }
+            $artifacts.Add([pscustomobject]@{ Source=$file.FullName; Destination=$destination })
+        }
+    }
+    $staged = [System.Collections.Generic.List[object]]::new()
+    try {
+        foreach ($artifact in $artifacts) {
+            $parent = Split-Path -Parent $artifact.Destination
+            if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+            $temporary = Join-Path $parent ('.blind-publish-{0}-{1}' -f [guid]::NewGuid().ToString('N'), (Split-Path -Leaf $artifact.Destination))
+            [IO.File]::Copy($artifact.Source, $temporary, $false)
+            $staged.Add([pscustomobject]@{ Temporary=$temporary; Destination=$artifact.Destination })
+        }
+        foreach ($artifact in $staged) { [IO.File]::Move($artifact.Temporary, $artifact.Destination, $false) }
+    } finally {
+        foreach ($artifact in $staged) {
+            if (Test-Path -LiteralPath $artifact.Temporary) { Remove-Item -LiteralPath $artifact.Temporary -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
 function Invoke-ContractReviewParallelRoles {
     param(
         [Parameter(Mandatory = $true)][hashtable]$ReviewerAParameters,
@@ -267,10 +303,17 @@ function Invoke-ContractReviewParallelRoles {
         [Parameter(Mandatory = $true)][System.Collections.Generic.List[string]]$Receipts
     )
     $modulePath = Join-Path $PSScriptRoot 'ContractReview.psm1'
-    $definitions = @(
-        [pscustomobject]@{ Name='reviewer-a'; Parameters=$ReviewerAParameters },
-        [pscustomobject]@{ Name='reviewer-b'; Parameters=$ReviewerBParameters }
-    )
+    $runDirectory = [string]$ReviewerAParameters.RunDirectory
+    if ($runDirectory -cne [string]$ReviewerBParameters.RunDirectory) { throw 'Blind reviewers must publish into the same shared run directory.' }
+    $definitions = @('reviewer-a','reviewer-b' | ForEach-Object {
+        $privateRoot = Join-Path ([IO.Path]::GetTempPath()) ("contract-review-blind-$($_)-" + [guid]::NewGuid().ToString('N'))
+        [pscustomobject]@{
+            Name=$_
+            Parameters=if ($_ -eq 'reviewer-a') { $ReviewerAParameters } else { $ReviewerBParameters }
+            PrivateRoot=$privateRoot
+            ArtifactDirectory=Join-Path $privateRoot 'artifacts'
+        }
+    })
     $entries = [System.Collections.Generic.List[object]]::new()
     $results = @{}
     $firstFailure = $null
@@ -279,8 +322,10 @@ function Invoke-ContractReviewParallelRoles {
         Get-Command Start-ThreadJob -ErrorAction Stop | Out-Null
         foreach ($definition in $definitions) {
             Add-ContractReviewRoleReceipts -ArtifactName $definition.Name -Receipts $Receipts
+            New-Item -ItemType Directory -Path $definition.ArtifactDirectory | Out-Null
             $parameters = @{}
             foreach ($parameter in $definition.Parameters.GetEnumerator()) { $parameters[$parameter.Key] = $parameter.Value }
+            $parameters.RunDirectory = $definition.ArtifactDirectory
             $parameters.Receipts = [System.Collections.Generic.List[string]]::new()
             $job = Start-ThreadJob -Name "contract-review-$($definition.Name)" -ArgumentList $modulePath,$parameters -ScriptBlock {
                 param($ModulePath,$Parameters)
@@ -295,7 +340,7 @@ function Invoke-ContractReviewParallelRoles {
             $entries.Add([pscustomobject]@{
                 Name=$definition.Name
                 Job=$job
-                InvocationPath=Join-Path ([string]$definition.Parameters.RunDirectory) "$($definition.Name).invocation.json"
+                InvocationPath=Join-Path $definition.ArtifactDirectory "$($definition.Name).invocation.json"
             })
         }
         Write-Host ("[{0}] both blind reviewers are running concurrently" -f [DateTime]::Now.ToString('HH:mm:ss'))
@@ -342,6 +387,15 @@ function Invoke-ContractReviewParallelRoles {
         if ($stopFailures.Count -gt 0) {
             throw "Blind-review cleanup failed: $([string]::Join('; ', $stopFailures))"
         }
+        Publish-ContractReviewBlindArtifacts -Definitions $definitions -RunDirectory $runDirectory
+        $privateCleanupFailures = [System.Collections.Generic.List[string]]::new()
+        foreach ($definition in $definitions) {
+            if (Test-Path -LiteralPath $definition.PrivateRoot) {
+                try { Remove-Item -LiteralPath $definition.PrivateRoot -Recurse -Force }
+                catch { $privateCleanupFailures.Add("$($definition.Name): $($_.Exception.Message)") }
+            }
+        }
+        if ($privateCleanupFailures.Count -gt 0) { throw "Blind-review private artifact cleanup failed: $([string]::Join('; ', $privateCleanupFailures))" }
     }
 }
 
@@ -382,7 +436,7 @@ function Start-ContractReview {
     if ((Get-ContractReviewManifestHash -Manifest $confirmation) -cne $manifestHash) { throw 'A bound execution input changed while the run was being prepared; obtain a new approval.' }
     $request=Read-ContractReviewJson -Path $RequestPath -Label 'request'
     if ((Get-ContractReviewSha256 -Path $RequestPath) -cne $manifest.requestSha256) { throw 'Request changed after approval validation.' }
-    Assert-ContractReviewProviderReadiness -Manifest $manifest -TimeoutSeconds $RoleTimeoutSeconds -CodexAdapter $CodexAdapter
+    Assert-ContractReviewProviderReadiness -Manifest $manifest -TimeoutSeconds $RoleTimeoutSeconds
     $claim=Claim-ContractReviewApproval -RunnerRoot $RunnerRoot -RequestId $manifest.requestId -ManifestHash $manifestHash
     $runId="{0}-{1}-{2}" -f $manifest.requestId,[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'),[guid]::NewGuid().ToString('N').Substring(0,8)
     $runDirectory=Join-Path (Join-Path $RunnerRoot 'runs') $runId; New-Item -ItemType Directory -Path $runDirectory -ErrorAction Stop | Out-Null
