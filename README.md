@@ -2,16 +2,18 @@
 
 `Start-ContractReview.ps1` is the read-only decision loop. It never edits a contract and it never reads a ticket body.
 
-> **Development status:** Pre-release and fail-closed. Hermetic tests pass, but real-provider validation is still in progress. The current evidence validator requires excerpts to be exact source substrings; provider instructions are being hardened so Markdown wrapping or ellipses cannot produce an avoidable validation failure.
+> **Development status:** Pre-release and fail-closed. Hermetic tests pass, while live-provider validation is still in progress. Review failures retain their receipts and require a fresh request ID; runs are never silently retried.
 
 ## Public-repository boundary
 
 This repository contains only the runner, schemas, generic examples, and fake-provider tests. Review requests, prompts, responses, receipts, run directories, target repositories, credentials, provider settings, and local handoff notes are runtime/private data and must not be committed.
 
+Public updates use a clean, allowlisted export based on this repository's `main`. Development-checkout history and internal support files are intentionally not connected or merged into this public history.
+
 ## Locked flow
 
-1. One fresh Claude CLI and one fresh Codex CLI receive the same byte-identical blind-review prompt. `-AllCodex` substitutes a second fresh Codex CLI for Claude.
-2. A fresh Codex comparator accounts for every finding as `AGREED`, `RESOLVED_BY_READING`, `ONE_SIDED`, `NEEDS_PROOF`, or `USER_DECISION`.
+1. One fresh Claude CLI and one fresh Codex CLI receive the same byte-identical blind-review prompt and run concurrently. `-AllCodex` substitutes a second fresh Codex CLI for Claude. Comparison starts only after both succeed.
+2. A fresh Codex comparator accounts for every finding as `AGREED`, `RESOLVED_BY_READING`, `RESOLVED_BY_JUDGMENT`, `ONE_SIDED`, `NEEDS_PROOF`, or `USER_DECISION`. Judgment resolution is limited to choosing between otherwise compliant replacement-tag names. Each judgment classification covers exactly one existing tag and must preserve identical disposition, destinations, and source fragments apart from the proposed replacement name; other differences are classified separately.
 3. Each original reviewer receives the `NEEDS_PROOF` set and only its own findings, then proves, qualifies, withdraws, or exposes a user choice.
 4. A fresh Codex validator receives both initial reviews, every classification, and both proof responses. The coordinator rejects missing, duplicate, or unknown references mechanically.
 5. The packet is `COMPLETE`, `USER_DECISION_REQUIRED`, `BLOCKED_RULES_OR_SETTINGS`, or `FAILED`. The human decides any unresolved choice.
@@ -32,7 +34,7 @@ The contract epic has precedence for review-protocol conflicts. Contracts remain
 - Each role and Git/splitter operation is bounded. Timeout kills the adapter/provider process tree and treats a partial Windows tree-kill as failure.
 - A provider bootstrap rejection caused by invalid isolation configuration stops as `BLOCKED_RULES_OR_SETTINGS`, retains its invocation and stderr receipts, and does not continue to another role.
 - If a provider rejects authentication after the final readiness check, the adapter records a provider-authentication blocker and the coordinator stops as `BLOCKED_RULES_OR_SETTINGS` with its receipts.
-- Every evidence excerpt must occur verbatim in the cited immutable input. Proofs must name every finding on that side of a disputed classification, and resolution outcomes mechanically determine the exact accepted finding IDs.
+- Every evidence excerpt must match one contiguous cited input passage after whitespace-only normalization. All non-whitespace characters and their order must remain unchanged; paraphrases, reordered text, joined passages, and omission ellipses fail. Proofs must name every finding on that side of a disputed classification, and resolution outcomes mechanically determine the exact accepted finding IDs.
 - Worktree removal and target verification happen before the final packet. Cleanup failure is terminal.
 
 ## Request and run
@@ -64,7 +66,11 @@ The packet path is printed for every terminal packet. Process exit codes are det
 
 ## Stage 1
 
-Stage 1 is materialized only after exhaustive validation reaches `COMPLETE`. The splitter is taken from the approved target revision. It tiles the source exactly once, rejects unsafe destinations, invalid dispositions/shapes, duplicate proposed tags, and existing output, then writes copied source byte slices without newline, BOM, or final-newline normalization. Tag changes stay outside copied text as separately reviewable metadata.
+Stage 1 is materialized only after exhaustive validation reaches `COMPLETE`. Before either reviewer starts, the exact splitter from the approved target revision must pass a check-only compatibility probe covering repository-relative contract paths, untagged sections, separate `MOVE` rename metadata, and multi-destination `SPLIT` metadata.
+
+Each accepted placement records exact destination-specific source fragments, and every final manifest row cites the accepted finding IDs it implements. The coordinator expands those assignments and rejects a mismatched range, destination, or proposed tag. A `SPLIT` duplicates one complete range only when every byte belongs in every destination; destination-specific subranges require separate non-overlapping `MOVE` rows.
+
+The completed manifest passes check-only validation again before materialization. The splitter tiles the source exactly once, rejects unsafe destinations, invalid shapes, duplicate proposed tags, and existing output, and writes each staging file at its repository-relative contract path. Copied source byte slices retain their newline, BOM, and final-newline bytes. Tag changes remain outside copied text as separately reviewable metadata.
 
 ## Human apply handoff
 
@@ -92,4 +98,4 @@ Recovery is explicit and verifies the recorded PID plus its process start time b
 pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\ContractReview.Tests.ps1
 ```
 
-The suite is hermetic and fake-provider-only. It tests adapter isolation/structured output, role-specific prompt/schema/post-validation parity and retained schema hashes, the exact empty Claude MCP record, seed-time and claim-time provider readiness, unconsumed approvals after failed readiness, late provider-authentication and provider-configuration blockers, terminal process exit codes, Claude+Codex and all-Codex role assignment, ticket firewalling, executable-bound execution manifests, replay, evidence fidelity, exhaustive finding/proof/resolution accounting, Stage 1 gating, apply denial/authorization, process-tree timeout cleanup, PID-safe recovery, artifact hashes, and target cleanliness. It never launches real Claude or Codex.
+The suite is hermetic and fake-provider-only. It tests adapter isolation/structured output, canonical-to-provider schema translation, mechanical uniqueness checks, role-specific prompt/schema/post-validation parity and retained schema hashes, pinned-splitter compatibility before provider startup, completed-manifest check-only validation, destination-fragment accounting, provider readiness and authentication blockers, concurrent Claude+Codex and all-Codex blind roles, peer cancellation before comparison, ticket firewalling, executable-bound execution manifests, replay, evidence fidelity, exhaustive finding/proof/resolution accounting, Stage 1 gating, apply denial/authorization, process-tree timeout cleanup, exact-PID recovery, artifact hashes, and target cleanliness. It never launches real Claude or Codex.

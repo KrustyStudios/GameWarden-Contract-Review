@@ -3,6 +3,7 @@ param([Parameter(ValueFromPipeline=$true)][string]$PromptInput,[Parameter(ValueF
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 function Assert-StrictSchema([object]$Schema,[string]$Path='$'){
+    if($Schema.PSObject.Properties.Name -contains 'uniqueItems'){throw "$Path uses unsupported Codex structured-output keyword uniqueItems."}
     if($Schema.PSObject.Properties.Name -contains 'definitions'){foreach($property in $Schema.definitions.PSObject.Properties){Assert-StrictSchema $property.Value "$Path.definitions.$($property.Name)"}}
     $types=if($Schema.PSObject.Properties.Name -contains 'type'){@($Schema.type)}else{@()}
     if($types -contains 'object'){

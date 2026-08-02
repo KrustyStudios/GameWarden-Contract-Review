@@ -28,13 +28,25 @@
     "placement": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["disposition", "destinations", "existingTag", "proposedTags", "rationale"],
+      "required": ["disposition", "destinations", "existingTag", "proposedTags", "fragments", "rationale"],
       "properties": {
         "disposition": { "enum": ["MOVE", "SPLIT", "PHASE-2", "NO_CHANGE", "NOT_APPLICABLE"] },
-        "destinations": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "destinations": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^contracts/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+_CONTRACT\\.md$" } },
         "existingTag": { "type": ["string", "null"] },
         "proposedTags": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "fragments": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/definitions/stage1Fragment" } },
         "rationale": { "type": "string", "minLength": 1 }
+      }
+    },
+    "stage1Fragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "destination", "proposedTag"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 1 },
+        "end": { "type": "integer", "minimum": 1 },
+        "destination": { "type": "string", "pattern": "^contracts/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+_CONTRACT\\.md$" },
+        "proposedTag": { "type": ["string", "null"] }
       }
     },
     "finding": {
@@ -55,7 +67,10 @@
       "required": ["id", "classification", "statement", "reviewerAFindingIds", "reviewerBFindingIds", "evidence", "rationale"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
-        "classification": { "enum": ["AGREED", "RESOLVED_BY_READING", "ONE_SIDED", "NEEDS_PROOF", "USER_DECISION"] },
+        "classification": {
+          "description": "RESOLVED_BY_JUDGMENT records the comparator's explained choice between sensible compliant replacement-tag names; it is not a general policy-choice category.",
+          "enum": ["AGREED", "RESOLVED_BY_READING", "RESOLVED_BY_JUDGMENT", "ONE_SIDED", "NEEDS_PROOF", "USER_DECISION"]
+        },
         "statement": { "type": "string", "minLength": 1 },
         "reviewerAFindingIds": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
         "reviewerBFindingIds": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
@@ -100,14 +115,15 @@
     "stage1": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["start", "end", "destinations", "name", "disposition", "perDestinationNames"],
+      "required": ["start", "end", "destinations", "name", "disposition", "perDestinationNames", "findingIds"],
       "properties": {
         "start": { "type": "integer", "minimum": 1 },
         "end": { "type": "integer", "minimum": 1 },
-        "destinations": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "destinations": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^contracts/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+_CONTRACT\\.md$" } },
         "name": { "type": "string", "minLength": 1 },
         "disposition": { "enum": ["MOVE", "SPLIT", "PHASE-2"] },
-        "perDestinationNames": { "type": ["array", "null"], "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+        "perDestinationNames": { "type": ["array", "null"], "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "findingIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
       }
     }
   }

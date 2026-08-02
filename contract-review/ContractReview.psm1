@@ -1,12 +1,13 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'ContractReview.Runtime.ps1')
+. (Join-Path $PSScriptRoot 'ContractReview.Core.ps1')
+. (Join-Path $PSScriptRoot 'ContractReview.Stage1.ps1')
 . (Join-Path $PSScriptRoot 'ContractReview.Validation.ps1')
 
 $script:GovernancePaths = @('AI_RULES.md','AI_GUARDRAILS.md','contracts/APP_CONTRACT.md','.design/contract-epic.md')
 $script:RunnerPaths = @(
     'Start-ContractReview.ps1','Recover-InterruptedContractReview.ps1','contract-review/ContractRecovery.psm1','contract-review/ContractApply.psm1',
-    'contract-review/ContractReview.psm1','contract-review/ContractReview.Runtime.ps1','contract-review/ContractReview.Validation.ps1',
+    'contract-review/ContractReview.psm1','contract-review/ContractReview.Core.ps1','contract-review/ContractReview.Stage1.ps1','contract-review/ContractReview.Validation.ps1',
     'contract-review/Invoke-ClaudeReview.ps1','contract-review/Invoke-CodexReview.ps1',
     'schemas/agent-response.schema.json','schemas/contract-review-request.schema.json',
     'schemas/contract-review-execution.schema.json','schemas/contract-apply-decision.schema.json'
@@ -50,13 +51,13 @@ function Get-ContractReviewExecutionManifest {
     if ((Resolve-Path -LiteralPath $ClaudeAdapter).Path -ne $defaultClaude) { $runnerFiles['configured-claude-adapter'] = Get-ContractReviewSha256 -Path $ClaudeAdapter }
     if ((Resolve-Path -LiteralPath $CodexAdapter).Path -ne $defaultCodex) { $runnerFiles['configured-codex-adapter'] = Get-ContractReviewSha256 -Path $CodexAdapter }
     $codexCommand = Resolve-ContractReviewProviderCommand -Provider codex
-    $codexProvider = [ordered]@{ provider='codex'; model=$CodexModel; reasoningEffort=$CodexReasoningEffort; commandPath=$codexCommand.path; commandSha256=$codexCommand.sha256 }
+    $codexProvider = [ordered]@{ provider='codex'; model=$CodexModel; reasoningEffort=$CodexReasoningEffort; commandPath=$codexCommand.path; commandSha256=$codexCommand.sha256; commandVersion=$codexCommand.version }
     $claudeProvider = if ($AllCodex) { $null } else {
         $claudeCommand = Resolve-ContractReviewProviderCommand -Provider claude
-        [ordered]@{ provider='claude'; model=$ClaudeModel; reasoningEffort=$null; commandPath=$claudeCommand.path; commandSha256=$claudeCommand.sha256 }
+        [ordered]@{ provider='claude'; model=$ClaudeModel; reasoningEffort=$null; commandPath=$claudeCommand.path; commandSha256=$claudeCommand.sha256; commandVersion=$claudeCommand.version }
     }
     return [ordered]@{
-        protocolVersion = 2; requestId = [string]$request.requestId; requestSha256 = Get-ContractReviewSha256 -Path $RequestPath
+        protocolVersion = 5; requestId = [string]$request.requestId; requestSha256 = Get-ContractReviewSha256 -Path $RequestPath
         targetRepository = $target.Path; targetRevision = $target.Revision; pinnedObjects = $pinned; runnerFiles = $runnerFiles
         reviewMode = if ($AllCodex) { 'all-codex' } else { 'claude-codex' }
         providers = [ordered]@{
@@ -73,6 +74,33 @@ function Get-ContractReviewExecutionManifest {
 }
 
 function Get-ContractReviewManifestHash { param([object]$Manifest) return Get-ContractReviewTextSha256 -Text ($Manifest | ConvertTo-Json -Depth 64 -Compress) }
+
+function Invoke-ContractReviewSplitterProcess {
+    param(
+        [string]$Splitter,[string]$Source,[string]$Manifest,[string]$OutDir,[string]$RunDirectory,
+        [string]$ArtifactPrefix,[int]$TimeoutSeconds,[switch]$CheckOnly
+    )
+    $stdout = Join-Path $RunDirectory "$ArtifactPrefix.stdout.log"
+    $stderr = Join-Path $RunDirectory "$ArtifactPrefix.stderr.log"
+    $arguments = @('-NoLogo','-NoProfile','-NonInteractive','-File',$Splitter,'-Source',$Source,'-Manifest',$Manifest,'-OutDir',$OutDir)
+    if ($CheckOnly) { $arguments += '-CheckOnly' }
+    $start = New-ContractReviewProcessStartInfo -FilePath (Get-Command pwsh.exe -ErrorAction Stop).Path -Arguments $arguments -WorkingDirectory $RunDirectory -Environment @{} -StdoutPath $stdout -StderrPath $stderr
+    return Invoke-ContractReviewBoundedProcess -StartInfo $start.Info -StdoutPath $stdout -StderrPath $stderr -TimeoutSeconds $TimeoutSeconds -ProgressIntervalSeconds 10 -Label $ArtifactPrefix
+}
+
+function Invoke-ContractReviewSplitterCompatibilityPreflight {
+    param([string]$Splitter,[string]$RunDirectory,[int]$TimeoutSeconds,[Collections.Generic.List[string]]$Receipts)
+    $source = Join-Path $RunDirectory 'splitter-compatibility-source.md'
+    $manifest = Join-Path $RunDirectory 'splitter-compatibility-manifest.tsv'
+    Write-ContractReviewAtomicText -Path $source -Text "Document framing`n[shared rule]`n"
+    $rows = @(
+        [pscustomobject]@{start=1;end=1;destinations=@('contracts/lifecycle/PROBE_CONTRACT.md');name='Document framing';disposition='MOVE';perDestinationNames=@('[probe framing]');findingIds=@('probe-framing')},
+        [pscustomobject]@{start=2;end=2;destinations=@('contracts/lifecycle/PROBE_CONTRACT.md','contracts/APP_CONTRACT.md');name='[shared rule]';disposition='SPLIT';perDestinationNames=@('[probe lifecycle]','[probe app]');findingIds=@('probe-split')}
+    )
+    Write-ContractReviewStage1Manifest -Rows $rows -Path $manifest
+    foreach ($name in @('splitter-compatibility-source.md','splitter-compatibility-manifest.tsv','splitter-compatibility.stdout.log','splitter-compatibility.stderr.log')) { [void]$Receipts.Add($name) }
+    [void](Invoke-ContractReviewSplitterProcess -Splitter $Splitter -Source $source -Manifest $manifest -OutDir (Join-Path $RunDirectory 'splitter-compatibility-output') -RunDirectory $RunDirectory -ArtifactPrefix 'splitter-compatibility' -TimeoutSeconds $TimeoutSeconds -CheckOnly)
+}
 
 function Get-ContractReviewApproval {
     [CmdletBinding()]
@@ -116,6 +144,16 @@ function Copy-ContractReviewInputs {
     }
 }
 
+function Add-ContractReviewRoleReceipts {
+    param([string]$ArtifactName,[System.Collections.Generic.List[string]]$Receipts)
+    foreach ($name in @(
+        "$ArtifactName.prompt.txt","$ArtifactName.response-schema.json","$ArtifactName.stdout.log",
+        "$ArtifactName.stderr.log","$ArtifactName.provider.json","$ArtifactName.invocation.json","$ArtifactName.json"
+    )) {
+        if (-not $Receipts.Contains($name)) { [void]$Receipts.Add($name) }
+    }
+}
+
 function Invoke-ContractReviewRole {
     param(
         [string]$Adapter,[string]$Role,[string]$ArtifactName,[ValidateSet('claude','codex')][string]$Provider,
@@ -135,7 +173,7 @@ function Invoke-ContractReviewRole {
         adapterProcessId=$null; adapterProcessStartTimeUtc=$null; startedUtc=[DateTime]::UtcNow.ToString('o'); completedUtc=$null; status='starting'; providerMetadata=$null
     }
     Write-ContractReviewAtomicJson -Path $invocationPath -Value $invocation
-    foreach ($name in @("$ArtifactName.prompt.txt",$responseSchemaName,"$ArtifactName.stdout.log","$ArtifactName.stderr.log","$ArtifactName.provider.json","$ArtifactName.invocation.json","$ArtifactName.json")) { [void]$Receipts.Add($name) }
+    Add-ContractReviewRoleReceipts -ArtifactName $ArtifactName -Receipts $Receipts
     $environment=@{
         CONTRACT_REVIEW_ROLE=$Role; CONTRACT_REVIEW_ARTIFACT_NAME=$ArtifactName; CONTRACT_REVIEW_PROMPT_FILE=$promptPath; CONTRACT_REVIEW_OUTPUT_PATH=$outputPath
         CONTRACT_REVIEW_METADATA_PATH=$metadataPath; CONTRACT_REVIEW_MODEL=$Model; CONTRACT_REVIEW_REASONING_EFFORT=$ReasoningEffort
@@ -180,6 +218,126 @@ function Invoke-ContractReviewRole {
         throw $failure
     }
     finally { $invocation.completedUtc=[DateTime]::UtcNow.ToString('o'); Write-ContractReviewAtomicJson -Path $invocationPath -Value $invocation }
+}
+
+function Test-ContractReviewParallelRoleCompleted {
+    param([Parameter(Mandatory = $true)][string]$InvocationPath)
+    if (-not (Test-Path -LiteralPath $InvocationPath -PathType Leaf)) { return $false }
+    $invocation = Read-ContractReviewJson -Path $InvocationPath -Label 'invocation receipt'
+    return -not [string]::IsNullOrWhiteSpace([string]$invocation.completedUtc)
+}
+
+function Stop-ContractReviewParallelRoleProcess {
+    param([Parameter(Mandatory = $true)][string]$InvocationPath)
+    if (-not (Test-Path -LiteralPath $InvocationPath -PathType Leaf)) { return }
+    try {
+        Stop-ContractReviewRecordedProcessTree -InvocationPath $InvocationPath | Out-Null
+    } catch {
+        $terminationFailure = $_
+        if (-not (Test-ContractReviewParallelRoleCompleted -InvocationPath $InvocationPath)) { throw $terminationFailure }
+        if (Get-ContractReviewRecordedProcess -InvocationPath $InvocationPath) { throw $terminationFailure }
+    }
+}
+
+function Stop-ContractReviewParallelRole {
+    param([Parameter(Mandatory = $true)][object]$Entry)
+    if ($Entry.Job.State -in @('NotStarted','Running')) {
+        Wait-Job -Job $Entry.Job -Timeout 1 -ErrorAction SilentlyContinue | Out-Null
+    }
+    if (Test-ContractReviewParallelRoleCompleted -InvocationPath $Entry.InvocationPath) {
+        if ($Entry.Job.State -in @('NotStarted','Running')) { Stop-Job -Job $Entry.Job -ErrorAction SilentlyContinue }
+        return
+    }
+    Stop-ContractReviewParallelRoleProcess -InvocationPath $Entry.InvocationPath
+    if ($Entry.Job.State -in @('NotStarted','Running')) {
+        Stop-Job -Job $Entry.Job -ErrorAction SilentlyContinue
+    }
+    Stop-ContractReviewParallelRoleProcess -InvocationPath $Entry.InvocationPath
+}
+
+function Invoke-ContractReviewParallelRoles {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$ReviewerAParameters,
+        [Parameter(Mandatory = $true)][hashtable]$ReviewerBParameters,
+        [Parameter(Mandatory = $true)][System.Collections.Generic.List[string]]$Receipts
+    )
+    $modulePath = Join-Path $PSScriptRoot 'ContractReview.psm1'
+    $definitions = @(
+        [pscustomobject]@{ Name='reviewer-a'; Parameters=$ReviewerAParameters },
+        [pscustomobject]@{ Name='reviewer-b'; Parameters=$ReviewerBParameters }
+    )
+    $entries = [System.Collections.Generic.List[object]]::new()
+    $results = @{}
+    $firstFailure = $null
+    $stopFailures = [System.Collections.Generic.List[string]]::new()
+    try {
+        Get-Command Start-ThreadJob -ErrorAction Stop | Out-Null
+        foreach ($definition in $definitions) {
+            Add-ContractReviewRoleReceipts -ArtifactName $definition.Name -Receipts $Receipts
+            $parameters = @{}
+            foreach ($parameter in $definition.Parameters.GetEnumerator()) { $parameters[$parameter.Key] = $parameter.Value }
+            $parameters.Receipts = [System.Collections.Generic.List[string]]::new()
+            $job = Start-ThreadJob -Name "contract-review-$($definition.Name)" -ArgumentList $modulePath,$parameters -ScriptBlock {
+                param($ModulePath,$Parameters)
+                $module = Import-Module $ModulePath -Force -PassThru
+                try {
+                    $response = & $module { param($RoleParameters) Invoke-ContractReviewRole @RoleParameters } $Parameters
+                    [pscustomobject]@{ Succeeded=$true; Response=$response; ErrorMessage=$null }
+                } catch {
+                    [pscustomobject]@{ Succeeded=$false; Response=$null; ErrorMessage=$_.Exception.Message }
+                }
+            }
+            $entries.Add([pscustomobject]@{
+                Name=$definition.Name
+                Job=$job
+                InvocationPath=Join-Path ([string]$definition.Parameters.RunDirectory) "$($definition.Name).invocation.json"
+            })
+        }
+        Write-Host ("[{0}] both blind reviewers are running concurrently" -f [DateTime]::Now.ToString('HH:mm:ss'))
+        $pending = @($entries)
+        $nextProgress = [DateTime]::UtcNow.AddSeconds(30)
+        while ($pending.Count -gt 0) {
+            $finished = @($pending | Where-Object { $_.Job.State -notin @('NotStarted','Running') })
+            foreach ($entry in $finished) {
+                $jobOutput = @(Receive-Job -Job $entry.Job -ErrorAction SilentlyContinue)
+                $result = @($jobOutput | Where-Object { $_.PSObject.Properties.Name -contains 'Succeeded' } | Select-Object -Last 1)
+                if ($result.Count -eq 0) {
+                    $reason = if ($entry.Job.JobStateInfo.Reason) { $entry.Job.JobStateInfo.Reason.Message } else { "parallel role $($entry.Name) ended in state $($entry.Job.State)" }
+                    $result = @([pscustomobject]@{ Succeeded=$false; Response=$null; ErrorMessage=$reason })
+                }
+                $results[$entry.Name] = $result[0]
+                $pending = @($pending | Where-Object { $_.Job.Id -ne $entry.Job.Id })
+                if (-not $result[0].Succeeded -and -not $firstFailure) {
+                    $firstFailure = [string]$result[0].ErrorMessage
+                    foreach ($peer in $pending) {
+                        try { Stop-ContractReviewParallelRole -Entry $peer }
+                        catch { $stopFailures.Add("$($peer.Name): $($_.Exception.Message)") }
+                    }
+                }
+            }
+            if ($pending.Count -gt 0) {
+                if ([DateTime]::UtcNow -ge $nextProgress) {
+                    Write-Host ("[{0}] blind review pair still running" -f [DateTime]::Now.ToString('HH:mm:ss'))
+                    $nextProgress = [DateTime]::UtcNow.AddSeconds(30)
+                }
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        if ($stopFailures.Count -gt 0) { throw "$firstFailure; peer termination failed: $([string]::Join('; ', $stopFailures))" }
+        if ($firstFailure) { throw $firstFailure }
+        return [pscustomobject]@{ ReviewerA=$results['reviewer-a'].Response; ReviewerB=$results['reviewer-b'].Response }
+    } finally {
+        foreach ($entry in $entries) {
+            if ($entry.Job.State -in @('NotStarted','Running')) {
+                try { Stop-ContractReviewParallelRole -Entry $entry }
+                catch { $stopFailures.Add("$($entry.Name): $($_.Exception.Message)") }
+            }
+            Remove-Job -Job $entry.Job -Force -ErrorAction SilentlyContinue
+        }
+        if ($stopFailures.Count -gt 0) {
+            throw "Blind-review cleanup failed: $([string]::Join('; ', $stopFailures))"
+        }
+    }
 }
 
 function Remove-ContractReviewWorktree {
@@ -238,12 +396,22 @@ function Start-ContractReview {
         Get-ChildItem -LiteralPath $inputRoot -Recurse -File | Sort-Object FullName | ForEach-Object { $inputHashes[[IO.Path]::GetRelativePath($inputRoot,$_.FullName).Replace('\','/')]=Get-ContractReviewSha256 -Path $_.FullName }
         Write-ContractReviewAtomicJson -Path (Join-Path $runDirectory 'input-manifest.json') -Value $inputHashes; [void]$receipts.Add('input-manifest.json')
         $inputBundle=New-ContractReviewInputBundle -InputRoot $inputRoot
+        if ($request.reviewKind -eq 'stage1') {
+            Invoke-ContractReviewSplitterCompatibilityPreflight -Splitter (Join-Path $worktree 'tools/ai/split-contract.ps1') -RunDirectory $runDirectory -TimeoutSeconds $SplitterTimeoutSeconds -Receipts $receipts
+        }
         $basePayload=[ordered]@{ reviewKind=$request.reviewKind; stage1=$request.stage1; reviewMode=$manifest.reviewMode }
         $blindPrompt=New-ContractReviewPrompt -Role 'blind-reviewer' -Request $request -InputBundle $inputBundle -Payload $basePayload
         $reviewerAProvider=if ($AllCodex) { 'codex' } else { 'claude' }; $reviewerAAdapter=if ($AllCodex) { $CodexAdapter } else { $ClaudeAdapter }
         $reviewerAModel=if ($AllCodex) { $CodexModel } else { $ClaudeModel }; $reviewerAEffort=if ($AllCodex) { $CodexReasoningEffort } else { $null }
-        $reviewerA=Invoke-ContractReviewRole -Adapter $reviewerAAdapter -Role blind-reviewer -ArtifactName reviewer-a -Provider $reviewerAProvider -Model $reviewerAModel -ReasoningEffort $reviewerAEffort -Prompt $blindPrompt -RunDirectory $runDirectory -RunnerRoot $RunnerRoot -InputRoot $inputRoot -ProviderCommand $manifest.providers.reviewerA.commandPath -TimeoutSeconds $RoleTimeoutSeconds -Receipts $receipts
-        $reviewerB=Invoke-ContractReviewRole -Adapter $CodexAdapter -Role blind-reviewer -ArtifactName reviewer-b -Provider codex -Model $CodexModel -ReasoningEffort $CodexReasoningEffort -Prompt $blindPrompt -RunDirectory $runDirectory -RunnerRoot $RunnerRoot -InputRoot $inputRoot -ProviderCommand $manifest.providers.reviewerB.commandPath -TimeoutSeconds $RoleTimeoutSeconds -Receipts $receipts
+        $blindReviews=Invoke-ContractReviewParallelRoles -ReviewerAParameters @{
+            Adapter=$reviewerAAdapter;Role='blind-reviewer';ArtifactName='reviewer-a';Provider=$reviewerAProvider;Model=$reviewerAModel;ReasoningEffort=$reviewerAEffort
+            Prompt=$blindPrompt;RunDirectory=$runDirectory;RunnerRoot=$RunnerRoot;InputRoot=$inputRoot;ProviderCommand=$manifest.providers.reviewerA.commandPath;TimeoutSeconds=$RoleTimeoutSeconds
+        } -ReviewerBParameters @{
+            Adapter=$CodexAdapter;Role='blind-reviewer';ArtifactName='reviewer-b';Provider='codex';Model=$CodexModel;ReasoningEffort=$CodexReasoningEffort
+            Prompt=$blindPrompt;RunDirectory=$runDirectory;RunnerRoot=$RunnerRoot;InputRoot=$inputRoot;ProviderCommand=$manifest.providers.reviewerB.commandPath;TimeoutSeconds=$RoleTimeoutSeconds
+        } -Receipts $receipts
+        $reviewerA=$blindReviews.ReviewerA
+        $reviewerB=$blindReviews.ReviewerB
         $comparisonPayload=[ordered]@{ reviewerA=$reviewerA; reviewerB=$reviewerB; reviewContext=$basePayload }
         $comparison=Invoke-ContractReviewRole -Adapter $CodexAdapter -Role comparator -ArtifactName comparison -Provider codex -Model $CodexModel -ReasoningEffort $CodexReasoningEffort -Prompt (New-ContractReviewPrompt -Role comparator -Request $request -InputBundle $inputBundle -Payload $comparisonPayload) -RunDirectory $runDirectory -RunnerRoot $RunnerRoot -InputRoot $inputRoot -ProviderCommand $manifest.providers.comparator.commandPath -TimeoutSeconds $RoleTimeoutSeconds -Receipts $receipts
         Assert-ContractReviewComparisonAccounting -ReviewerA $reviewerA -ReviewerB $reviewerB -Comparison $comparison
@@ -255,6 +423,7 @@ function Start-ContractReview {
         $validationPayload=[ordered]@{ reviewerA=$reviewerA; reviewerB=$reviewerB; comparison=$comparison; reviewerAProof=$proofA; reviewerBProof=$proofB; reviewContext=$basePayload }
         $validation=Invoke-ContractReviewRole -Adapter $CodexAdapter -Role validator -ArtifactName validation -Provider codex -Model $CodexModel -ReasoningEffort $CodexReasoningEffort -Prompt (New-ContractReviewPrompt -Role validator -Request $request -InputBundle $inputBundle -Payload $validationPayload) -RunDirectory $runDirectory -RunnerRoot $RunnerRoot -InputRoot $inputRoot -ProviderCommand $manifest.providers.validator.commandPath -TimeoutSeconds $RoleTimeoutSeconds -Receipts $receipts
         Assert-ContractReviewValidationAccounting -ReviewerA $reviewerA -ReviewerB $reviewerB -Comparison $comparison -Validation $validation
+        Assert-ContractReviewStage1ManifestAccounting -ReviewerA $reviewerA -ReviewerB $reviewerB -Validation $validation -Request $request -InputRoot $inputRoot
         $packet.reviewerA=$reviewerA; $packet.reviewerB=$reviewerB; $packet.comparison=$comparison; $packet.reviewerAProof=$proofA; $packet.reviewerBProof=$proofB; $packet.validation=$validation; $packet.unresolved=@($validation.unresolved)
         if (@($validation.unresolved).Count -gt 0) {
             if (@($validation.stage1Manifest).Count -ne 0) { throw 'Stage 1 materialization is forbidden while user decisions remain.' }
@@ -265,10 +434,11 @@ function Start-ContractReview {
                 $manifestPath=Join-Path $runDirectory 'stage1-manifest.tsv'
                 Write-ContractReviewStage1Manifest -Rows @($validation.stage1Manifest) -Path $manifestPath
                 $stageOut=Join-Path $runDirectory 'stage1'; $splitter=Join-Path $worktree 'tools/ai/split-contract.ps1'; $stageSource=Join-Path $worktree ([string]$request.stage1.sourceContract)
-                $splitStart=New-ContractReviewProcessStartInfo -FilePath (Get-Command pwsh.exe -ErrorAction Stop).Path -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-File',$splitter,'-Source',$stageSource,'-Manifest',$manifestPath,'-OutDir',$stageOut) -WorkingDirectory $runDirectory -Environment @{} -StdoutPath (Join-Path $runDirectory 'splitter.stdout.log') -StderrPath (Join-Path $runDirectory 'splitter.stderr.log')
-                $null=Invoke-ContractReviewBoundedProcess -StartInfo $splitStart.Info -StdoutPath $splitStart.StdoutPath -StderrPath $splitStart.StderrPath -TimeoutSeconds $SplitterTimeoutSeconds -ProgressIntervalSeconds 10 -Label 'Stage 1 splitter'
+                foreach ($name in @('stage1-manifest.tsv','splitter-check.stdout.log','splitter-check.stderr.log')) { [void]$receipts.Add($name) }
+                [void](Invoke-ContractReviewSplitterProcess -Splitter $splitter -Source $stageSource -Manifest $manifestPath -OutDir $stageOut -RunDirectory $runDirectory -ArtifactPrefix 'splitter-check' -TimeoutSeconds $SplitterTimeoutSeconds -CheckOnly)
+                foreach ($name in @('stage1','splitter.stdout.log','splitter.stderr.log')) { [void]$receipts.Add($name) }
+                [void](Invoke-ContractReviewSplitterProcess -Splitter $splitter -Source $stageSource -Manifest $manifestPath -OutDir $stageOut -RunDirectory $runDirectory -ArtifactPrefix 'splitter' -TimeoutSeconds $SplitterTimeoutSeconds)
                 $packet.stage1=[ordered]@{ manifest='stage1-manifest.tsv'; output='stage1'; splitterGitObject=$manifest.pinnedObjects['tools/ai/split-contract.ps1'] }
-                foreach ($name in @('stage1-manifest.tsv','stage1','splitter.stdout.log','splitter.stderr.log')) { [void]$receipts.Add($name) }
             } elseif (@($validation.stage1Manifest).Count -ne 0) { throw 'A decision review cannot return a Stage 1 manifest.' }
         }
     } catch {

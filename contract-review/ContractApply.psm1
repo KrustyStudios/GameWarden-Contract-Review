@@ -1,6 +1,6 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'ContractReview.Runtime.ps1')
+. (Join-Path $PSScriptRoot 'ContractReview.Core.ps1')
 function Get-ContractApplyManifest {
     param([Parameter(Mandatory=$true)][string]$RunDirectory,[Parameter(Mandatory=$true)][string]$DecisionPath)
     $run=(Resolve-Path -LiteralPath $RunDirectory).Path

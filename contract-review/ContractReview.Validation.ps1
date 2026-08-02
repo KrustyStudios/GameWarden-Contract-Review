@@ -14,6 +14,38 @@ function Get-ContractReviewRoleAllowedFields {
     }
 }
 
+function Get-ContractReviewEvidenceRequirement {
+    return 'Copy one contiguous passage from the cited immutable input. Whitespace-only differences caused by line wrapping are allowed; every non-whitespace character and its order must match. Do not paraphrase, reorder text, join separate passages, or use an ellipsis to omit text.'
+}
+
+function Get-ContractReviewUniquenessRequirement {
+    return 'Every response array declared unique by the canonical response contract must contain no duplicate values. Uniqueness is mechanically checked after every response.'
+}
+
+function Get-ContractReviewTagJudgmentRequirement {
+    return 'When replacement tag names are both short, descriptive, and compliant, classify each existing tag in its own RESOLVED_BY_JUDGMENT classification, choose and explain the clearer compliant name; tag-wording preference alone is not a USER_DECISION. Each such classification covers exactly one existing tag, and every referenced finding must otherwise agree on disposition, destinations, and exact source fragments. Do not bundle another existing tag, a tag-independent observation, a boundary/range/destination difference, or any other dispute into that classification. Preserve global top-level tag uniqueness as an apply-time uniqueness gate before any RENAME.'
+}
+
+function ConvertTo-ContractReviewProviderSchema {
+    param([AllowNull()][object]$Node)
+    if ($null -eq $Node -or $Node -is [string] -or $Node -is [ValueType]) { return }
+    if ($Node -is [Collections.IEnumerable] -and $Node -isnot [pscustomobject]) {
+        foreach ($item in $Node) { ConvertTo-ContractReviewProviderSchema -Node $item }
+        return
+    }
+    $properties = @($Node.PSObject.Properties)
+    if ($properties.Name -contains 'uniqueItems') {
+        if ($Node.uniqueItems -ne $true) { throw 'Canonical response schema contains an unsupported non-true uniqueItems value.' }
+        $Node.PSObject.Properties.Remove('uniqueItems')
+        $description = Get-ContractReviewUniquenessRequirement
+        if ($Node.PSObject.Properties.Name -contains 'description' -and -not [string]::IsNullOrWhiteSpace([string]$Node.description)) {
+            $description = "$($Node.description) $description"
+        }
+        $Node | Add-Member -NotePropertyName description -NotePropertyValue $description -Force
+    }
+    foreach ($property in @($Node.PSObject.Properties)) { ConvertTo-ContractReviewProviderSchema -Node $property.Value }
+}
+
 function New-ContractReviewRoleSchema {
     param(
         [Parameter(Mandatory = $true)][string]$BaseSchemaPath,
@@ -21,6 +53,11 @@ function New-ContractReviewRoleSchema {
         [Parameter(Mandatory = $true)][string]$Path
     )
     $schema = Read-ContractReviewJson -Path $BaseSchemaPath -Label 'base agent response schema'
+    if ($null -eq $schema.definitions.evidence.properties.excerpt) { throw 'Base response schema is missing the evidence excerpt definition.' }
+    $schema.definitions.evidence.properties.excerpt | Add-Member -NotePropertyName description -NotePropertyValue (Get-ContractReviewEvidenceRequirement) -Force
+    if ($null -eq $schema.definitions.comparison.properties.classification) { throw 'Base response schema is missing the comparison classification definition.' }
+    $classificationDescription = [string]$schema.definitions.comparison.properties.classification.description
+    $schema.definitions.comparison.properties.classification.description = "$classificationDescription $(Get-ContractReviewTagJudgmentRequirement)".Trim()
     $allowed = @(Get-ContractReviewRoleAllowedFields -Role $Role)
     foreach ($field in $script:ContractReviewResponseArrays) {
         if ($schema.properties.PSObject.Properties.Name -notcontains $field) { throw "Base response schema is missing '$field'." }
@@ -31,6 +68,7 @@ function New-ContractReviewRoleSchema {
             $property.PSObject.Properties.Remove('maxItems')
         }
     }
+    ConvertTo-ContractReviewProviderSchema -Node $schema
     Write-ContractReviewAtomicJson -Path $Path -Value $schema
     return $Path
 }
@@ -118,10 +156,10 @@ function New-ContractReviewPrompt {
     param([string]$Role, [object]$Request, [string]$InputBundle, [object]$Payload)
     $allowedFields = @(Get-ContractReviewRoleAllowedFields -Role $Role)
     $roleInstruction = switch ($Role) {
-        'blind-reviewer' { 'Independently inspect every supplied input. Report every relevant finding, including placement and tag/disposition details. Do not infer a desired answer.' }
-        'comparator' { 'Account for every finding from both blind reviews exactly once. Classify agreements and differences; resolve only by reading when the immutable inputs prove the answer.' }
+        'blind-reviewer' { 'Independently inspect every supplied input. Report every relevant finding, including placement and tag/disposition details. For Stage 1 placement findings, list the exact source line range, final contract path, and proposed tag metadata for every destination-specific fragment. Do not infer a desired answer.' }
+        'comparator' { "Account for every finding from both blind reviews exactly once. Classify agreements and differences; resolve by reading when the immutable inputs prove the answer. $(Get-ContractReviewTagJudgmentRequirement)" }
         'proof-reviewer' { 'For every NEEDS_PROOF classification, defend, qualify, or withdraw your own finding using only cited immutable input evidence.' }
-        'validator' { 'Recheck all blind findings, classifications, and proofs against the immutable inputs. Produce exactly one final resolution for every classification and expose every remaining user choice.' }
+        'validator' { "Recheck all blind findings, classifications, and proofs against the immutable inputs. Produce exactly one final resolution for every classification and expose every remaining user choice. Every Stage 1 manifest row must cite the accepted finding IDs it implements and must reproduce their destination fragment assignments exactly. Reject unnecessary escalation by enforcing this rule: $(Get-ContractReviewTagJudgmentRequirement)" }
         default { throw "Unknown prompt role '$Role'." }
     }
     $payloadText = if ($null -eq $Payload) { '{}' } else { $Payload | ConvertTo-Json -Depth 64 -Compress }
@@ -136,7 +174,8 @@ function New-ContractReviewPrompt {
         'The contract epic governs this review protocol when review rules conflict. The contracts govern application behavior.',
         'Return only the schema-constrained JSON envelope. Use status blocker with a precise reason and empty arrays if rules or settings conflict.',
         "Only these response arrays may be non-empty for ${Role}: $([string]::Join(', ', $allowedFields)). All other response arrays must be empty.",
-        'Evidence must name an immutable input, a human-readable locator, and a short excerpt. A MOVE preserves original rule bytes and its current tag. A tag change is separate metadata, never hidden in a move.',
+        "Evidence excerpt contract: $(Get-ContractReviewEvidenceRequirement) Evidence must also name the immutable input and a human-readable locator. A MOVE preserves original rule bytes and its current tag. A tag change is separate metadata, never hidden in a move. A SPLIT duplicates one complete range only when every byte belongs in every destination; different destination-specific subranges require separate non-overlapping MOVE rows.",
+        "Uniqueness contract: $(Get-ContractReviewUniquenessRequirement)",
         '',
         'ROLE PAYLOAD:',
         $payloadText,
@@ -158,6 +197,18 @@ function Assert-ContractReviewEvidence {
     }
 }
 
+function ConvertTo-ContractReviewComparableEvidenceText {
+    param([AllowEmptyString()][string]$Text)
+    return ([regex]::Replace($Text, '\s+', ' ')).Trim()
+}
+
+function Test-ContractReviewEvidenceExcerpt {
+    param([string]$SourceText, [string]$Excerpt)
+    $comparableSource = ConvertTo-ContractReviewComparableEvidenceText -Text $SourceText
+    $comparableExcerpt = ConvertTo-ContractReviewComparableEvidenceText -Text $Excerpt
+    return $comparableExcerpt.Length -gt 0 -and $comparableSource.IndexOf($comparableExcerpt, [StringComparison]::Ordinal) -ge 0
+}
+
 function Assert-ContractReviewResponseEvidence {
     param([object]$Response, [string]$Role, [string]$InputRoot)
     $groups = switch ($Role) {
@@ -174,8 +225,8 @@ function Assert-ContractReviewResponseEvidence {
                 throw "Agent $Role cited an input that was not supplied: $($item.source)"
             }
             $text = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $path), [Text.UTF8Encoding]::new($false, $true))
-            if ($text.IndexOf([string]$item.excerpt, [StringComparison]::Ordinal) -lt 0) {
-                throw "Agent $Role evidence excerpt does not occur verbatim in $($item.source)."
+            if (-not (Test-ContractReviewEvidenceExcerpt -SourceText $text -Excerpt ([string]$item.excerpt))) {
+                throw "Agent $Role evidence excerpt is not one contiguous source passage after whitespace-only normalization in $($item.source)."
             }
         }
     }
@@ -191,6 +242,15 @@ function Assert-ContractReviewUniqueIds {
         $ids += $id
     }
     return $ids
+}
+
+function Assert-ContractReviewUniqueStrings {
+    param([AllowNull()][AllowEmptyCollection()][object[]]$Values, [Parameter(Mandatory = $true)][string]$Label)
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($value in @($Values)) {
+        $text = [string]$value
+        if (-not $seen.Add($text)) { throw "$Label contains duplicate value '$text'." }
+    }
 }
 
 function Assert-ContractReviewResponse {
@@ -212,16 +272,32 @@ function Assert-ContractReviewResponse {
             if ([string]$finding.classification -notin @('fact','judgment')) { throw 'Finding classification must be fact or judgment.' }
             Assert-ContractReviewEvidence -Evidence @($finding.evidence) -Label "finding $($finding.id)"
             if (@($finding.evidence).Count -eq 0) { throw "Finding $($finding.id) requires source evidence." }
-            Assert-ContractReviewExactProperties -Value $finding.placement -Required @('disposition','destinations','existingTag','proposedTags','rationale') -Label "finding $($finding.id) placement"
+            Assert-ContractReviewExactProperties -Value $finding.placement -Required @('disposition','destinations','existingTag','proposedTags','fragments','rationale') -Label "finding $($finding.id) placement"
+            Assert-ContractReviewUniqueStrings -Values @($finding.placement.destinations) -Label "finding $($finding.id) placement destinations"
+            foreach ($destination in @($finding.placement.destinations)) { Assert-ContractReviewContractDestination -Value ([string]$destination) -Label "finding $($finding.id) placement destination" }
+            Assert-ContractReviewUniqueStrings -Values @($finding.placement.proposedTags) -Label "finding $($finding.id) placement proposedTags"
+            foreach ($tag in @($finding.placement.proposedTags)) { Assert-ContractReviewTagMetadata -Value ([string]$tag) -Label "finding $($finding.id) proposed tag" }
+            if ($null -ne $finding.placement.existingTag) { Assert-ContractReviewTagMetadata -Value ([string]$finding.placement.existingTag) -Label "finding $($finding.id) existing tag" }
+            $fragmentKeys = @()
+            foreach ($fragment in @($finding.placement.fragments)) {
+                Assert-ContractReviewExactProperties -Value $fragment -Required @('start','end','destination','proposedTag') -Label "finding $($finding.id) fragment"
+                if ([int]$fragment.start -lt 1 -or [int]$fragment.end -lt [int]$fragment.start) { throw "Finding $($finding.id) fragment has an invalid source range." }
+                Assert-ContractReviewContractDestination -Value ([string]$fragment.destination) -Label "finding $($finding.id) fragment destination"
+                if ($null -ne $fragment.proposedTag) { Assert-ContractReviewTagMetadata -Value ([string]$fragment.proposedTag) -Label "finding $($finding.id) fragment proposed tag" }
+                $fragmentKeys += Get-ContractReviewStage1AssignmentKey -Start $fragment.start -End $fragment.end -Destination ([string]$fragment.destination) -ProposedTag $fragment.proposedTag
+            }
+            Assert-ContractReviewUniqueStrings -Values $fragmentKeys -Label "finding $($finding.id) fragment assignments"
         }
     }
     if ($Role -eq 'comparator') {
         [void](Assert-ContractReviewUniqueIds -Values @($Response.classifications) -Label 'classifications')
         foreach ($item in @($Response.classifications)) {
             Assert-ContractReviewExactProperties -Value $item -Required @('id','classification','statement','reviewerAFindingIds','reviewerBFindingIds','evidence','rationale') -Label 'classification'
-            if ([string]$item.classification -notin @('AGREED','RESOLVED_BY_READING','ONE_SIDED','NEEDS_PROOF','USER_DECISION')) { throw "Invalid comparison classification '$($item.classification)'." }
+            if ([string]$item.classification -notin @('AGREED','RESOLVED_BY_READING','RESOLVED_BY_JUDGMENT','ONE_SIDED','NEEDS_PROOF','USER_DECISION')) { throw "Invalid comparison classification '$($item.classification)'." }
             Assert-ContractReviewEvidence -Evidence @($item.evidence) -Label "classification $($item.id)"
             if (@($item.evidence).Count -eq 0) { throw "Classification $($item.id) requires source evidence." }
+            Assert-ContractReviewUniqueStrings -Values @($item.reviewerAFindingIds) -Label "classification $($item.id) reviewerAFindingIds"
+            Assert-ContractReviewUniqueStrings -Values @($item.reviewerBFindingIds) -Label "classification $($item.id) reviewerBFindingIds"
         }
     }
     if ($Role -eq 'proof-reviewer') {
@@ -230,6 +306,7 @@ function Assert-ContractReviewResponse {
             Assert-ContractReviewExactProperties -Value $proof -Required @('classificationId','findingIds','position','evidence','rationale') -Label 'proof'
             if ([string]$proof.position -notin @('CONFIRM','WITHDRAW','QUALIFY','USER_DECISION')) { throw "Invalid proof position '$($proof.position)'." }
             Assert-ContractReviewEvidence -Evidence @($proof.evidence) -Label "proof $($proof.classificationId)"
+            Assert-ContractReviewUniqueStrings -Values @($proof.findingIds) -Label "proof $($proof.classificationId) findingIds"
         }
     }
     if ($Role -eq 'validator') {
@@ -240,8 +317,15 @@ function Assert-ContractReviewResponse {
             if ([string]$resolution.outcome -notin @('ACCEPT_A','ACCEPT_B','ACCEPT_BOTH','REJECT_BOTH','USER_DECISION')) { throw "Invalid resolution outcome '$($resolution.outcome)'." }
             Assert-ContractReviewEvidence -Evidence @($resolution.evidence) -Label "resolution $($resolution.classificationId)"
             if (@($resolution.evidence).Count -eq 0) { throw "Resolution $($resolution.classificationId) requires source evidence." }
+            Assert-ContractReviewUniqueStrings -Values @($resolution.acceptedFindingIds) -Label "resolution $($resolution.classificationId) acceptedFindingIds"
         }
-        foreach ($unresolved in @($Response.unresolved)) { Assert-ContractReviewExactProperties -Value $unresolved -Required @('id','reason','options') -Label 'unresolved item' }
+        foreach ($unresolved in @($Response.unresolved)) {
+            Assert-ContractReviewExactProperties -Value $unresolved -Required @('id','reason','options') -Label 'unresolved item'
+            Assert-ContractReviewUniqueStrings -Values @($unresolved.options) -Label "unresolved item $($unresolved.id) options"
+        }
+        foreach ($row in @($Response.stage1Manifest)) {
+            Assert-ContractReviewStage1Row -Row $row
+        }
     }
 }
 
@@ -254,6 +338,24 @@ function Assert-ContractReviewComparisonAccounting {
         foreach ($id in @($item.reviewerAFindingIds)) { if ($id -notin $aIds) { throw "Classification $($item.id) references unknown reviewer A finding '$id'." }; if ($id -in $seenA) { throw "Reviewer A finding '$id' is classified more than once." }; $seenA += $id }
         foreach ($id in @($item.reviewerBFindingIds)) { if ($id -notin $bIds) { throw "Classification $($item.id) references unknown reviewer B finding '$id'." }; if ($id -in $seenB) { throw "Reviewer B finding '$id' is classified more than once." }; $seenB += $id }
         if (@($item.reviewerAFindingIds).Count + @($item.reviewerBFindingIds).Count -eq 0) { throw "Classification $($item.id) references no finding." }
+        if ([string]$item.classification -eq 'RESOLVED_BY_JUDGMENT') {
+            $aFindings = @($ReviewerA.findings | Where-Object { [string]$_.id -in @($item.reviewerAFindingIds) })
+            $bFindings = @($ReviewerB.findings | Where-Object { [string]$_.id -in @($item.reviewerBFindingIds) })
+            $aTags = @($aFindings | ForEach-Object { @($_.placement.proposedTags) } | ForEach-Object { [string]$_ })
+            $bTags = @($bFindings | ForEach-Object { @($_.placement.proposedTags) } | ForEach-Object { [string]$_ })
+            $aDestinations = @($aFindings | ForEach-Object { @($_.placement.destinations) } | ForEach-Object { [string]$_ })
+            $bDestinations = @($bFindings | ForEach-Object { @($_.placement.destinations) } | ForEach-Object { [string]$_ })
+            $aFragments = @($aFindings | ForEach-Object { @($_.placement.fragments) } | ForEach-Object { Get-ContractReviewStage1AssignmentKey -Start $_.start -End $_.end -Destination ([string]$_.destination) -ProposedTag $null } | Sort-Object -Unique)
+            $bFragments = @($bFindings | ForEach-Object { @($_.placement.fragments) } | ForEach-Object { Get-ContractReviewStage1AssignmentKey -Start $_.start -End $_.end -Destination ([string]$_.destination) -ProposedTag $null } | Sort-Object -Unique)
+            $dispositions = @($aFindings + $bFindings | ForEach-Object { [string]$_.placement.disposition } | Sort-Object -Unique)
+            $existingTags = @($aFindings + $bFindings | ForEach-Object { [string]$_.placement.existingTag } | Sort-Object -Unique)
+            $isTagOnlyDifference = $aFindings.Count -gt 0 -and $bFindings.Count -gt 0 -and $aTags.Count -gt 0 -and $bTags.Count -gt 0 -and
+                -not(Test-ContractReviewSameStringSet -Left $aTags -Right $bTags) -and
+                (Test-ContractReviewSameStringSet -Left @($aDestinations | Sort-Object -Unique) -Right @($bDestinations | Sort-Object -Unique)) -and
+                (Test-ContractReviewSameStringSet -Left $aFragments -Right $bFragments) -and
+                $dispositions.Count -eq 1 -and $existingTags.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace([string]$existingTags[0])
+            if (-not$isTagOnlyDifference) { throw "Classification $($item.id) may use RESOLVED_BY_JUDGMENT only for one replacement-tag difference covering exactly one existing tag and no unrelated findings; its placement otherwise agrees in disposition, destinations, and exact source fragments." }
+        }
     }
     foreach ($id in $aIds) { if ($id -notin $seenA) { throw "Reviewer A finding '$id' was omitted by the comparator." } }
     foreach ($id in $bIds) { if ($id -notin $seenB) { throw "Reviewer B finding '$id' was omitted by the comparator." } }
@@ -293,18 +395,4 @@ function Assert-ContractReviewValidationAccounting {
     $userIds = @($Validation.resolutions | Where-Object outcome -eq 'USER_DECISION' | ForEach-Object { [string]$_.classificationId })
     $unresolvedIds = @($Validation.unresolved | ForEach-Object { [string]$_.id })
     if (-not(Test-ContractReviewSameStringSet -Left $userIds -Right $unresolvedIds)) { throw 'Unresolved items must exactly match USER_DECISION resolutions.' }
-}
-
-function Write-ContractReviewStage1Manifest {
-    param([object[]]$Rows, [string]$Path)
-    if (@($Rows).Count -eq 0) { throw 'Completed Stage 1 validation supplied no manifest rows.' }
-    $lines = @('# Generated from validated Stage 1 resolutions. Proposed tags are metadata outside copied source bytes.')
-    foreach ($row in @($Rows)) {
-        Assert-ContractReviewExactProperties -Value $row -Required @('start','end','destinations','name','disposition','perDestinationNames') -Label 'Stage 1 row'
-        if ([string]$row.disposition -notin @('MOVE','SPLIT','PHASE-2')) { throw "Unsupported Stage 1 disposition '$($row.disposition)'." }
-        $line = "$($row.start)-$($row.end)`t$(@($row.destinations) -join ',')`t$($row.name)`t$($row.disposition)"
-        if ($null -ne $row.perDestinationNames) { $line += "`t$(@($row.perDestinationNames) -join ',')" }
-        $lines += $line
-    }
-    Write-ContractReviewAtomicText -Path $Path -Text ([string]::Join("`n", $lines) + "`n")
 }
