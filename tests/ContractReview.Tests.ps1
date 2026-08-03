@@ -149,3 +149,4 @@ try {
 }
 
 & (Join-Path $PSScriptRoot 'DestinationReview.Tests.ps1')
+& (Join-Path $PSScriptRoot 'Phase2.Tests.ps1')
