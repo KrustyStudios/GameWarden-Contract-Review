@@ -119,6 +119,8 @@ try {
         [Convert]::ToHexString([IO.File]::ReadAllBytes((Join-Path $logRoot 'blind-B.prompt.md')))
     ) 'Blind reviewers did not receive byte-identical prompts.'
     $blindPrompt = Get-Content (Join-Path $logRoot 'blind-A.prompt.md') -Raw
+    Assert-True ($blindPrompt -match 'first line must\s+begin with STATUS:') 'Blind prompt did not require a raw first-line status.'
+    Assert-True ($blindPrompt -match 'Do not wrap the response in a Markdown code fence') 'Blind prompt allowed an outer Markdown fence.'
     foreach ($inputPath in @($guidePath, $rulesPath, $guardrailsPath, $targetPath, $stagingRoot)) {
         Assert-True ($blindPrompt.Contains($inputPath, [StringComparison]::Ordinal)) "Blind prompt omitted the exact input path: $inputPath"
     }
