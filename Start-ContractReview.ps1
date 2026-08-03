@@ -1,11 +1,16 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'SourceReview')]
 param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-z0-9][a-z0-9-]{2,79}$')][string]$RunId,
     [Parameter(Mandatory = $true)][string]$GuidePath,
     [Parameter(Mandatory = $true)][string]$RulesPath,
     [Parameter(Mandatory = $true)][string]$GuardrailsPath,
-    [Parameter(Mandatory = $true)][string]$TargetPath,
-    [Parameter(Mandatory = $true)][string]$SplitterPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'SourceReview')][string]$TargetPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'SourceReview')][string]$SplitterPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'DestinationReview')][switch]$DestinationReview,
+    [Parameter(Mandatory = $true, ParameterSetName = 'DestinationReview')][string]$OriginalSourcePath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'DestinationReview')][string]$IncomingPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'DestinationReview')][string]$DestinationPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'DestinationReview')][string]$MaterializerPath,
     [string]$Approval,
     [switch]$ShowApproval,
     [switch]$AllCodex,
@@ -372,6 +377,31 @@ function Write-Receipt {
 $($artifactLines -join "`n")
 "@
     Write-AtomicText (Join-Path $RunDirectory 'receipt.md') ($text.TrimEnd() + "`n")
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'DestinationReview') {
+    $destinationModulePath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'ContractReview.Destination.ps1')).Path
+    . $destinationModulePath
+    $destinationResult = Invoke-ContractDestinationReview `
+        -RunIdentifier $RunId `
+        -Guide $GuidePath `
+        -Rules $RulesPath `
+        -Guardrails $GuardrailsPath `
+        -OriginalSource $OriginalSourcePath `
+        -Incoming $IncomingPath `
+        -Destination $DestinationPath `
+        -Materializer $MaterializerPath `
+        -ApprovalPhrase $Approval `
+        -PrintApproval:$ShowApproval `
+        -UseAllCodex:$AllCodex `
+        -ClaudeCliCommand $ClaudeCommand `
+        -CodexCliCommand $CodexCommand `
+        -RunsDirectory $RunsRoot `
+        -WatcherPath $PSCommandPath `
+        -ModulePath $destinationModulePath `
+        -Processes $activeProcesses
+    Write-Output $destinationResult.Output
+    exit $destinationResult.ExitCode
 }
 
 $guide = Resolve-LeafPath $GuidePath 'Guide'
