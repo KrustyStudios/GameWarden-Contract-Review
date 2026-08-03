@@ -147,3 +147,5 @@ try {
     Remove-Item Env:\CONTRACT_REVIEW_FAKE_SCENARIO -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+& (Join-Path $PSScriptRoot 'DestinationReview.Tests.ps1')
