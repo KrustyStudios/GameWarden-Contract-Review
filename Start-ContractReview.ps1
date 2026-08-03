@@ -203,11 +203,74 @@ function Start-RoleProcess {
     }
 }
 
+function Get-DescendantProcesses {
+    param([int]$RootProcessId)
+    $rows = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId)
+    $treeIds = [Collections.Generic.HashSet[int]]::new()
+    [void]$treeIds.Add($RootProcessId)
+    do {
+        $added = 0
+        foreach ($row in $rows) {
+            $processId = [int]$row.ProcessId
+            if ($processId -ne $RootProcessId -and $treeIds.Contains([int]$row.ParentProcessId) -and $treeIds.Add($processId)) {
+                $added++
+            }
+        }
+    } while ($added -gt 0)
+
+    $descendants = [Collections.Generic.List[Diagnostics.Process]]::new()
+    foreach ($processId in $treeIds) {
+        if ($processId -eq $RootProcessId) { continue }
+        try { $descendants.Add([Diagnostics.Process]::GetProcessById($processId)) }
+        catch [ArgumentException] { }
+    }
+    $descendants.ToArray()
+}
+
+function Wait-ForProcessExit {
+    param([Diagnostics.Process]$Process, [DateTime]$Deadline, [string]$Label)
+    if ($Process.HasExited) { return }
+    $remaining = [int][Math]::Ceiling(($Deadline - [DateTime]::UtcNow).TotalMilliseconds)
+    if ($remaining -le 0 -or -not $Process.WaitForExit($remaining)) {
+        throw "Could not terminate the $Label process tree."
+    }
+}
+
+function Remove-PrivateDirectory {
+    param([string]$Path)
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ($true) {
+        try {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            return
+        } catch {
+            if ([DateTime]::UtcNow -ge $deadline) { throw }
+            # Windows can release a terminated process's working-directory handle just after WaitForExit returns.
+            Start-Sleep -Milliseconds 25
+        }
+    }
+}
+
 function Stop-RoleProcess {
     param([object]$Role)
-    if ($null -eq $Role -or $Role.Process.HasExited) { return }
-    $Role.Process.Kill($true)
-    if (-not $Role.Process.WaitForExit(5000)) { throw "Could not terminate the $($Role.Slot) process tree." }
+    if ($null -eq $Role) { return }
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    # WaitForExit on Kill(true) covers the root only, so retain descendant handles and wait on them explicitly.
+    $descendants = @(Get-DescendantProcesses $Role.Process.Id)
+    try {
+        if (-not $Role.Process.HasExited) { $Role.Process.Kill($true) }
+        foreach ($descendant in $descendants) {
+            if (-not $descendant.HasExited) { $descendant.Kill($true) }
+        }
+        Wait-ForProcessExit $Role.Process $deadline $Role.Slot
+        foreach ($descendant in $descendants) {
+            Wait-ForProcessExit $descendant $deadline $Role.Slot
+        }
+        [void]$Role.Stdout.GetAwaiter().GetResult()
+        [void]$Role.Stderr.GetAwaiter().GetResult()
+    } finally {
+        foreach ($descendant in $descendants) { $descendant.Dispose() }
+    }
 }
 
 function Complete-RoleProcess {
@@ -426,7 +489,7 @@ try {
         }
         $process.Dispose()
     }
-    try { Remove-Item -LiteralPath $privateRoot -Recurse -Force -ErrorAction Stop }
+    try { Remove-PrivateDirectory $privateRoot }
     catch { $failure = (($failure, "Cleanup failed: $($_.Exception.Message)" | Where-Object { $_ }) -join "`n"); $status = 'FAILED' }
     try { Assert-InputsUnchanged $state }
     catch {
