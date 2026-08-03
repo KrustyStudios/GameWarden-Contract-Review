@@ -122,21 +122,23 @@ try {
     Assert-True (-not (Test-Path (Join-Path $run 'private'))) 'Private review directory was retained.'
 
     $failureRuns = Join-Path $tempRoot 'failure-runs'
-    $failureLog = Join-Path $tempRoot 'failure-log'
-    New-Item -ItemType Directory -Path $failureLog | Out-Null
-    $env:CONTRACT_REVIEW_FAKE_LOG_DIR = $failureLog
     $env:CONTRACT_REVIEW_FAKE_SCENARIO = 'fail-a'
-    $failureApprovalResult = Invoke-Runner -RunId 'test-failure' -RunsRoot $failureRuns -Extra @('-ShowApproval')
-    $failureApproval = [regex]::Match($failureApprovalResult.Output, 'APPROVE CONTRACT REVIEW test-failure [a-f0-9]{64}').Value
-    $failure = Invoke-Runner -RunId 'test-failure' -RunsRoot $failureRuns -Extra @('-Approval', $failureApproval)
-    Assert-True ($failure.ExitCode -ne 0) 'Provider failure was reported as success.'
-    Assert-True ($failure.Output -match 'deliberate reviewer failure') 'Original provider error was hidden.'
-    Assert-True (-not (Test-Path (Join-Path $failureLog 'comparator.start'))) 'Comparator started after blind-review failure.'
-    Assert-True (-not (Test-Path (Join-Path $failureRuns 'test-failure\private'))) 'Failure retained a private directory.'
-    Assert-True (Test-Path (Join-Path $failureRuns 'test-failure\failure.txt')) 'Failure evidence was not retained.'
-    $childPid = [int](Get-Content (Join-Path $failureLog 'blind-B.child-pid') -Raw)
-    Start-Sleep -Milliseconds 250
-    Assert-True (-not (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) 'Stopped peer left a child process running.'
+    foreach ($attempt in 1..25) {
+        $failureRunId = "test-failure-$attempt"
+        $failureLog = Join-Path $tempRoot "failure-log-$attempt"
+        New-Item -ItemType Directory -Path $failureLog | Out-Null
+        $env:CONTRACT_REVIEW_FAKE_LOG_DIR = $failureLog
+        $failureApprovalResult = Invoke-Runner -RunId $failureRunId -RunsRoot $failureRuns -Extra @('-ShowApproval')
+        $failureApproval = [regex]::Match($failureApprovalResult.Output, "APPROVE CONTRACT REVIEW $failureRunId [a-f0-9]{64}").Value
+        $failure = Invoke-Runner -RunId $failureRunId -RunsRoot $failureRuns -Extra @('-Approval', $failureApproval)
+        Assert-True ($failure.ExitCode -ne 0) "Provider failure was reported as success on attempt $attempt."
+        Assert-True ($failure.Output -match 'deliberate reviewer failure') "Original provider error was hidden on attempt $attempt."
+        Assert-True (-not (Test-Path (Join-Path $failureLog 'comparator.start'))) "Comparator started after blind-review failure on attempt $attempt."
+        Assert-True (-not (Test-Path (Join-Path $failureRuns "$failureRunId\private"))) "Failure retained a private directory on attempt $attempt."
+        Assert-True (Test-Path (Join-Path $failureRuns "$failureRunId\failure.txt")) "Failure evidence was not retained on attempt $attempt."
+        $childPid = [int](Get-Content (Join-Path $failureLog 'blind-B.child-pid') -Raw)
+        Assert-True (-not (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) "Stopped peer left a child process running on attempt $attempt."
+    }
 
     $global:LASTEXITCODE = 0
     Write-Host 'ContractReview.Tests.ps1: PASS' -ForegroundColor Green
