@@ -21,11 +21,16 @@ $inputPaths = [ordered]@{}
 foreach ($label in @('GUIDE', 'RULES', 'GUARDRAILS', 'SOURCE CONTRACT')) {
     $match = [regex]::Match($prompt, "(?m)^$([regex]::Escape($label)) PATH: (.+)$")
     if (-not $match.Success) { throw "Prompt omitted $label PATH." }
-    $inputPath = $match.Groups[1].Value.TrimEnd("`r")
-    if (-not (Test-Path -LiteralPath $inputPath -PathType Leaf)) { throw "$label input does not exist: $inputPath" }
-    [void][IO.File]::ReadAllBytes($inputPath)
-    $inputPaths[$label] = $inputPath
+    $path = $match.Groups[1].Value.TrimEnd("`r")
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "$label input does not exist: $path" }
+    [void][IO.File]::ReadAllBytes($path)
+    $inputPaths[$label] = $path
 }
+$stagingMatch = [regex]::Match($prompt, '(?m)^STAGING CONTRACT TREE PATH: (.+)$')
+if (-not $stagingMatch.Success) { throw 'Prompt omitted STAGING CONTRACT TREE PATH.' }
+$stagingPath = $stagingMatch.Groups[1].Value.TrimEnd("`r")
+if (-not (Test-Path -LiteralPath $stagingPath -PathType Container)) { throw "Staging tree does not exist: $stagingPath" }
+$inputPaths['STAGING CONTRACT TREE'] = $stagingPath
 [IO.File]::WriteAllText((Join-Path $logRoot "$slot.input-paths.txt"), (($inputPaths.Values -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
 
 if ($slot -like 'blind-*') {
@@ -53,21 +58,29 @@ $contractsMarker = "$([IO.Path]::DirectorySeparatorChar)contracts$([IO.Path]::Di
 $contractsIndex = $sourcePath.IndexOf($contractsMarker, [StringComparison]::OrdinalIgnoreCase)
 if ($contractsIndex -lt 0) { throw "Source path is not under contracts/: $sourcePath" }
 $destination = $sourcePath.Substring($contractsIndex + 1).Replace('\', '/')
+
 $report = switch -Wildcard ($slot) {
     'blind-A' {
-        "STATUS: OK`n# Blind review`nFinding count: 1`n`n## A1`nSource lines: 1-$lineCount`nSource tag: [EXAMPLE-RULE]`nDisposition: MOVE`nDestination: $destination`nProposed tag: [example]`nReason: complete source`nEvidence: [EXAMPLE-RULE]`n`n# Candidate Stage 1 manifest`n1-$lineCount`t$destination`texample`tMOVE`t[example]`n"
+        "STATUS: OK`nBEGIN PLACEMENT MANIFEST`n1-$lineCount`t$destination`t[EXAMPLE-RULE]`tMOVE`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
     }
     'blind-B' {
-        "STATUS: OK`n# Blind review`nFinding count: 2`n`n## B1`nSource lines: 1-1`nSource tag: NONE`nDisposition: MOVE`nDestination: $destination`nProposed tag: [example heading]`nReason: heading`nEvidence: # Example`n`n## B2`nSource lines: 2-$lineCount`nSource tag: [EXAMPLE-RULE]`nDisposition: MOVE`nDestination: $destination`nProposed tag: [example body]`nReason: body`nEvidence: [EXAMPLE-RULE]`n`n# Candidate Stage 1 manifest`n1-1`t$destination`texample heading`tMOVE`t[example heading]`n2-$lineCount`t$destination`texample body`tMOVE`t[example body]`n"
+        "STATUS: OK`nBEGIN PLACEMENT MANIFEST`n1-1`t$destination`tdocument framing`tMOVE`t-`n2-$lineCount`t$destination`t[EXAMPLE-RULE]`tMOVE`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
     }
     'comparator' {
-        "STATUS: OK`n# Comparison`n## Inventory and granularity`nA has 1 finding; B has 2. They have different finding counts and split the same source differently.`n## Agreements`nThe whole source moves to the same destination.`n## Differences and resolutions`nGranularity needs source proof.`nBEGIN PROOF REQUESTS`nA:A1 and B:B1/B2 must prove their source boundaries.`nEND PROOF REQUESTS`n"
+        "STATUS: OK`n# Comparison`n## Inventory and granularity`nA has one rule block; B has two. They group the same source differently.`n## Agreements`nBoth use $destination and [example].`n## Differences and resolutions`nThe framing boundary needs proof.`nBEGIN PROOF REQUESTS`nA and B must prove whether '# Example' is framing or part of [EXAMPLE-RULE].`nEND PROOF REQUESTS`n"
     }
     'proof-*' {
-        "STATUS: OK`n# Proof response`n## boundary`nResult: PROVED`nEvidence: # Example and the complete source.`n"
+        "STATUS: OK`n# Proof response`n## $destination / [example] / '# Example'`nResult: PROVED`nEvidence: '# Example' is separate framing above [EXAMPLE-RULE].`n"
     }
     'validator' {
-        "STATUS: COMPLETE`n# Final validation`n## Resolutions`nUse one complete-source move.`n## User decisions`nNONE`nBEGIN STAGE1 MANIFEST`n1-$lineCount`t$destination`texample`tMOVE`t[example]`nEND STAGE1 MANIFEST`n"
+        "STATUS: COMPLETE`n# Final validation`n## Resolutions`nKeep framing and the tagged rule together in one placement.`n## User decisions`nNONE`nBEGIN PLACEMENT MANIFEST`n1-$lineCount`t$destination`t[EXAMPLE-RULE]`tMOVE`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
+    }
+    'verifier' {
+        if ($scenario -eq 'block-verifier') {
+            "STATUS: BLOCKED`n# Staging verification`nThe staged tree deliberately failed verification.`n"
+        } else {
+            "STATUS: VERIFIED`n# Staging verification`nThe source, final generated review, and staged contract agree.`n"
+        }
     }
     default { throw "Unexpected test slot: $slot" }
 }

@@ -5,12 +5,8 @@ param(
     [Parameter(Mandatory = $true)][string]$RulesPath,
     [Parameter(Mandatory = $true)][string]$GuardrailsPath,
     [Parameter(Mandatory = $true, ParameterSetName = 'SourceReview')][string]$TargetPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'SourceReview')][string]$StagingRoot,
     [Parameter(Mandatory = $true, ParameterSetName = 'SourceReview')][string]$SplitterPath,
-    [Parameter(Mandatory = $true, ParameterSetName = 'DestinationReview')][switch]$DestinationReview,
-    [Parameter(Mandatory = $true, ParameterSetName = 'DestinationReview')][string]$OriginalSourcePath,
-    [Parameter(Mandatory = $true, ParameterSetName = 'DestinationReview')][string]$IncomingPath,
-    [Parameter(Mandatory = $true, ParameterSetName = 'DestinationReview')][string]$DestinationPath,
-    [Parameter(Mandatory = $true, ParameterSetName = 'DestinationReview')][string]$MaterializerPath,
     [Parameter(Mandatory = $true, ParameterSetName = 'Phase2')][switch]$Phase2,
     [Parameter(Mandatory = $true, ParameterSetName = 'Phase2')][string]$Phase2ManifestPath,
     [Parameter(Mandatory = $true, ParameterSetName = 'Phase2')][string]$OutputRoot,
@@ -58,6 +54,18 @@ function Get-FileHashValue {
     Get-BytesHash ([IO.File]::ReadAllBytes($Path))
 }
 
+function Get-TreeHashValue {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { throw "Staging tree not found: $Path" }
+    $root = (Resolve-Path -LiteralPath $Path).Path
+    $lines = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File | Sort-Object FullName)) {
+        $relative = [IO.Path]::GetRelativePath($root, $file.FullName).Replace('\', '/')
+        $lines += "$relative`t$(Get-FileHashValue $file.FullName)"
+    }
+    Get-BytesHash ([Text.Encoding]::UTF8.GetBytes(($lines -join "`n") + "`n"))
+}
+
 function Write-AtomicText {
     param([string]$Path, [string]$Text)
     $temporary = "$Path.tmp-$([guid]::NewGuid().ToString('N'))"
@@ -82,6 +90,8 @@ function Get-ApprovalPhrase {
         "guardrails-hash=$($State.GuardrailsHash)"
         "source-path=$($State.TargetPath)"
         "source-hash=$($State.TargetHash)"
+        "staging-root=$($State.StagingRootPath)"
+        "staging-hash=$($State.InitialStagingHash)"
         "watcher-path=$($State.WatcherPath)"
         "watcher-hash=$($State.WatcherHash)"
         "splitter-path=$($State.SplitterPath)"
@@ -114,6 +124,7 @@ function New-Prompt {
         [string]$Rules,
         [string]$Guardrails,
         [string]$Target,
+        [string]$Staging,
         [string]$Material = ''
     )
     @"
@@ -127,6 +138,7 @@ GUIDE PATH: $Guide
 RULES PATH: $Rules
 GUARDRAILS PATH: $Guardrails
 SOURCE CONTRACT PATH: $Target
+STAGING CONTRACT TREE PATH: $Staging
 
 ===== ROLE MATERIAL =====
 $Material
@@ -148,6 +160,52 @@ function Assert-InputsUnchanged {
             throw "$($input.Label) changed during review: $($input.Path)"
         }
     }
+}
+
+function Assert-StagingUnchanged {
+    param([hashtable]$State)
+    if ((Get-TreeHashValue $State.StagingRootPath) -ne $State.InitialStagingHash) {
+        throw "Staging tree changed before approved materialization: $($State.StagingRootPath)"
+    }
+}
+
+function Get-PrivatePlacement {
+    param([string]$Report, [string]$Directory)
+    $manifestMatch = [regex]::Match($Report, '(?ms)^BEGIN PLACEMENT MANIFEST[ \t]*\r?\n(.*?)^END PLACEMENT MANIFEST[ \t]*\r?$')
+    $splitMatch = [regex]::Match($Report, '(?ms)^BEGIN SPLIT TEXT[ \t]*\r?\n(.*?)^END SPLIT TEXT[ \t]*\r?$')
+    if (-not $manifestMatch.Success -or [string]::IsNullOrWhiteSpace($manifestMatch.Groups[1].Value)) {
+        throw 'Private reviewer response omitted the placement manifest.'
+    }
+    if (-not $splitMatch.Success -or [string]::IsNullOrWhiteSpace($splitMatch.Groups[1].Value)) {
+        throw 'Private reviewer response omitted split text.'
+    }
+    $manifestPath = Join-Path $Directory 'placement.tsv'
+    $splitPath = Join-Path $Directory 'split.txt'
+    Write-AtomicText $manifestPath ($manifestMatch.Groups[1].Value.Trim() + "`n")
+    Write-AtomicText $splitPath ($splitMatch.Groups[1].Value.Trim() + "`n")
+    [pscustomobject]@{ Manifest = $manifestPath; SplitText = $splitPath }
+}
+
+function Invoke-Splitter {
+    param(
+        [string]$Label,
+        [string]$Manifest,
+        [string]$SplitText,
+        [string]$ReviewOutput,
+        [string]$RunDirectory,
+        [string]$StageRoot,
+        [switch]$ApplyStaging,
+        [switch]$CheckOnly
+    )
+    if ([string]::IsNullOrWhiteSpace($StageRoot)) {
+        if ($CheckOnly) { $log = @(& $splitter -Source $target -Manifest $Manifest -SplitText $SplitText -ReviewOutput $ReviewOutput -CheckOnly 6>&1 2>&1) }
+        else { $log = @(& $splitter -Source $target -Manifest $Manifest -SplitText $SplitText -ReviewOutput $ReviewOutput 6>&1 2>&1) }
+    } else {
+        if ($CheckOnly) { $log = @(& $splitter -Source $target -Manifest $Manifest -SplitText $SplitText -ReviewOutput $ReviewOutput -StagingRoot $StageRoot -CheckOnly 6>&1 2>&1) }
+        elseif ($ApplyStaging) { $log = @(& $splitter -Source $target -Manifest $Manifest -SplitText $SplitText -ReviewOutput $ReviewOutput -StagingRoot $StageRoot -ApplyStaging 6>&1 2>&1) }
+        else { $log = @(& $splitter -Source $target -Manifest $Manifest -SplitText $SplitText -ReviewOutput $ReviewOutput -StagingRoot $StageRoot 6>&1 2>&1) }
+    }
+    Write-AtomicText (Join-Path $RunDirectory "$Label.txt") (($log -join "`n").TrimEnd() + "`n")
 }
 
 function Start-RoleProcess {
@@ -356,7 +414,7 @@ function Invoke-OneRole {
         if ([DateTime]::UtcNow -gt $deadline) { Stop-RoleProcess $role; throw "$Slot timed out after $RoleTimeoutSeconds seconds." }
         Start-Sleep -Milliseconds 100
     }
-    $result = Complete-RoleProcess $role $runDirectory @('OK', 'BLOCKED', 'COMPLETE', 'USER_DECISION_REQUIRED')
+    $result = Complete-RoleProcess $role $runDirectory @('OK', 'BLOCKED', 'COMPLETE', 'VERIFIED', 'USER_DECISION_REQUIRED')
     if ($result.Status -eq 'BLOCKED') { Write-AtomicText (Join-Path $runDirectory "$Slot.blocked.md") $result.Report; throw "$Slot reported STATUS: BLOCKED." }
     $result
 }
@@ -368,6 +426,11 @@ function Write-Receipt {
         $relative = [IO.Path]::GetRelativePath($RunDirectory, $file.FullName).Replace('\', '/')
         $artifactLines += ('- `{0}` — `{1}`' -f $relative, (Get-FileHashValue $file.FullName))
     }
+    $stagingLines = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $State.StagingRootPath -Recurse -File | Sort-Object FullName)) {
+        $relative = [IO.Path]::GetRelativePath($State.StagingRootPath, $file.FullName).Replace('\', '/')
+        $stagingLines += ('- `{0}` — `{1}`' -f $relative, (Get-FileHashValue $file.FullName))
+    }
     $mode = if ($AllCodex) { 'all-codex' } else { 'claude-codex' }
     $text = @"
 # Contract review receipt
@@ -378,6 +441,8 @@ function Write-Receipt {
 - Rules: $($State.RulesPath) — $($State.RulesHash)
 - Guardrails: $($State.GuardrailsPath) — $($State.GuardrailsHash)
 - Source: $($State.TargetPath) — $($State.TargetHash)
+- Staging tree before: $($State.StagingRootPath) — $($State.InitialStagingHash)
+- Staging tree after: $($State.StagingRootPath) — $(Get-TreeHashValue $State.StagingRootPath)
 - Watcher: $($State.WatcherPath) — $($State.WatcherHash)
 - Splitter: $($State.SplitterPath) — $($State.SplitterHash)
 - Mode: $mode
@@ -389,6 +454,10 @@ function Write-Receipt {
 ## Retained artifacts
 
 $($artifactLines -join "`n")
+
+## Staged contracts
+
+$($stagingLines -join "`n")
 "@
     Write-AtomicText (Join-Path $RunDirectory 'receipt.md') ($text.TrimEnd() + "`n")
 }
@@ -415,35 +484,13 @@ if ($PSCmdlet.ParameterSetName -eq 'Phase2') {
     exit $phase2Result.ExitCode
 }
 
-if ($PSCmdlet.ParameterSetName -eq 'DestinationReview') {
-    $destinationModulePath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'ContractReview.Destination.ps1')).Path
-    . $destinationModulePath
-    $destinationResult = Invoke-ContractDestinationReview `
-        -RunIdentifier $RunId `
-        -Guide $GuidePath `
-        -Rules $RulesPath `
-        -Guardrails $GuardrailsPath `
-        -OriginalSource $OriginalSourcePath `
-        -Incoming $IncomingPath `
-        -Destination $DestinationPath `
-        -Materializer $MaterializerPath `
-        -ApprovalPhrase $Approval `
-        -PrintApproval:$ShowApproval `
-        -UseAllCodex:$AllCodex `
-        -ClaudeCliCommand $ClaudeCommand `
-        -CodexCliCommand $CodexCommand `
-        -RunsDirectory $RunsRoot `
-        -WatcherPath $PSCommandPath `
-        -ModulePath $destinationModulePath `
-        -Processes $activeProcesses
-    Write-Output $destinationResult.Output
-    exit $destinationResult.ExitCode
-}
-
 $guide = Resolve-LeafPath $GuidePath 'Guide'
 $rules = Resolve-LeafPath $RulesPath 'Rules'
 $guardrails = Resolve-LeafPath $GuardrailsPath 'Guardrails'
 $target = Resolve-LeafPath $TargetPath 'Target'
+$staging = (Resolve-Path -LiteralPath $StagingRoot -ErrorAction Stop).Path
+if (-not (Test-Path -LiteralPath $staging -PathType Container)) { throw "Staging tree not found: $StagingRoot" }
+if ((Get-Item -LiteralPath $staging -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Staging tree cannot be a reparse point: $staging" }
 $splitter = Resolve-LeafPath $SplitterPath 'Splitter'
 $watcher = (Resolve-Path -LiteralPath $PSCommandPath).Path
 $codexCli = Resolve-CommandPath $CodexCommand 'Codex'
@@ -453,12 +500,14 @@ $state = @{
     RulesPath = $rules
     GuardrailsPath = $guardrails
     TargetPath = $target
+    StagingRootPath = $staging
     SplitterPath = $splitter
     WatcherPath = $watcher
     GuideHash = Get-FileHashValue $guide
     RulesHash = Get-FileHashValue $rules
     GuardrailsHash = Get-FileHashValue $guardrails
     TargetHash = Get-FileHashValue $target
+    InitialStagingHash = Get-TreeHashValue $staging
     SplitterHash = Get-FileHashValue $splitter
     WatcherHash = Get-FileHashValue $watcher
     ClaudeCommand = if ($AllCodex) { 'not-used' } else { $claudeCli }
@@ -466,7 +515,7 @@ $state = @{
     CodexCommand = $codexCli
     CodexCommandHash = Get-FileHashValue $codexCli
 }
-$inputDirectories = @(@($guide, $rules, $guardrails, $target) | ForEach-Object { Split-Path -Parent $_ } | Sort-Object -Unique)
+$inputDirectories = @((@($guide, $rules, $guardrails, $target) | ForEach-Object { Split-Path -Parent $_ }) + $staging | Sort-Object -Unique)
 $expectedApproval = Get-ApprovalPhrase $state
 if ($ShowApproval) { Write-Output $expectedApproval; exit 0 }
 if ($Approval -cne $expectedApproval) { throw "Approval mismatch. Run with -ShowApproval and use the exact printed phrase." }
@@ -480,7 +529,7 @@ $status = 'FAILED'
 $failure = $null
 
 try {
-    $blindPrompt = New-Prompt 'BLIND REVIEWER' $guide $rules $guardrails $target
+    $blindPrompt = New-Prompt 'BLIND REVIEWER' $guide $rules $guardrails $target $staging
     $blindA = New-RoleDirectory $privateRoot 'blind-a'
     $blindB = New-RoleDirectory $privateRoot 'blind-b'
     $providerA = if ($AllCodex) { 'codex' } else { 'claude' }
@@ -489,15 +538,29 @@ try {
     $roleB = Start-RoleProcess 'codex' 'blind-B' $blindB $blindPrompt $claudeCli $codexCli $inputDirectories $activeProcesses
     $blindResults = Wait-ParallelRoles $roleA $roleB $runDirectory @('OK', 'BLOCKED')
     Assert-InputsUnchanged $state
-    Write-AtomicText (Join-Path $runDirectory 'review-a.md') $blindResults[0].Report
-    Write-AtomicText (Join-Path $runDirectory 'review-b.md') $blindResults[1].Report
+    Assert-StagingUnchanged $state
+    $packetA = Get-PrivatePlacement $blindResults[0].Report $blindA
+    $packetB = Get-PrivatePlacement $blindResults[1].Report $blindB
+    $reviewAPath = Join-Path $runDirectory 'review-a.md'
+    $reviewBPath = Join-Path $runDirectory 'review-b.md'
+    $privateReviewA = Join-Path $blindA 'generated.md'
+    $privateReviewB = Join-Path $blindB 'generated.md'
+    Invoke-Splitter -Label 'splitter-check-a' -Manifest $packetA.Manifest -SplitText $packetA.SplitText -ReviewOutput $privateReviewA -RunDirectory $runDirectory -StageRoot $staging -CheckOnly
+    Invoke-Splitter -Label 'splitter-check-b' -Manifest $packetB.Manifest -SplitText $packetB.SplitText -ReviewOutput $privateReviewB -RunDirectory $runDirectory -StageRoot $staging -CheckOnly
+    Invoke-Splitter -Label 'splitter-render-a' -Manifest $packetA.Manifest -SplitText $packetA.SplitText -ReviewOutput $privateReviewA -RunDirectory $runDirectory -StageRoot $staging
+    Invoke-Splitter -Label 'splitter-render-b' -Manifest $packetB.Manifest -SplitText $packetB.SplitText -ReviewOutput $privateReviewB -RunDirectory $runDirectory -StageRoot $staging
+    Move-Item -LiteralPath $privateReviewA -Destination $reviewAPath
+    Move-Item -LiteralPath $privateReviewB -Destination $reviewBPath
+    $reviewA = [IO.File]::ReadAllText($reviewAPath, $utf8)
+    $reviewB = [IO.File]::ReadAllText($reviewBPath, $utf8)
 
     Write-Host 'Starting Codex comparator...'
-    $comparisonMaterial = "===== REVIEW A =====`n$($blindResults[0].Report)===== REVIEW B =====`n$($blindResults[1].Report)"
-    $comparisonPrompt = New-Prompt 'COMPARATOR' $guide $rules $guardrails $target $comparisonMaterial
+    $comparisonMaterial = "===== GENERATED REVIEW A =====`n$reviewA===== GENERATED REVIEW B =====`n$reviewB"
+    $comparisonPrompt = New-Prompt 'COMPARATOR' $guide $rules $guardrails $target $staging $comparisonMaterial
     $comparisonDir = New-RoleDirectory $privateRoot 'comparator'
     $comparison = Invoke-OneRole 'codex' 'comparator' $comparisonDir $comparisonPrompt $claudeCli $codexCli $inputDirectories
     Assert-InputsUnchanged $state
+    Assert-StagingUnchanged $state
     if ($comparison.Status -ne 'OK') { throw "Comparator returned unexpected status: $($comparison.Status)" }
     Write-AtomicText (Join-Path $runDirectory 'comparison.md') $comparison.Report
     $proofMatch = [regex]::Match($comparison.Report, '(?s)BEGIN PROOF REQUESTS\s*(.*?)\s*END PROOF REQUESTS')
@@ -509,14 +572,15 @@ try {
         $proofBReport = $proofAReport
     } else {
         Write-Host 'Starting proof reviewers concurrently...'
-        $proofPromptA = New-Prompt 'PROOF REVIEWER A' $guide $rules $guardrails $target "===== OWN REVIEW (SIDE A) =====`n$($blindResults[0].Report)===== PROOF REQUESTS =====`n$proofRequests"
-        $proofPromptB = New-Prompt 'PROOF REVIEWER B' $guide $rules $guardrails $target "===== OWN REVIEW (SIDE B) =====`n$($blindResults[1].Report)===== PROOF REQUESTS =====`n$proofRequests"
+        $proofPromptA = New-Prompt 'PROOF REVIEWER A' $guide $rules $guardrails $target $staging "===== OWN GENERATED REVIEW (SIDE A) =====`n$reviewA===== PROOF REQUESTS =====`n$proofRequests"
+        $proofPromptB = New-Prompt 'PROOF REVIEWER B' $guide $rules $guardrails $target $staging "===== OWN GENERATED REVIEW (SIDE B) =====`n$reviewB===== PROOF REQUESTS =====`n$proofRequests"
         $proofDirA = New-RoleDirectory $privateRoot 'proof-a'
         $proofDirB = New-RoleDirectory $privateRoot 'proof-b'
         $proofRoleA = Start-RoleProcess $providerA 'proof-A' $proofDirA $proofPromptA $claudeCli $codexCli $inputDirectories $activeProcesses
         $proofRoleB = Start-RoleProcess 'codex' 'proof-B' $proofDirB $proofPromptB $claudeCli $codexCli $inputDirectories $activeProcesses
         $proofResults = Wait-ParallelRoles $proofRoleA $proofRoleB $runDirectory @('OK', 'BLOCKED')
         Assert-InputsUnchanged $state
+        Assert-StagingUnchanged $state
         $proofAReport = $proofResults[0].Report
         $proofBReport = $proofResults[1].Report
     }
@@ -524,24 +588,35 @@ try {
     Write-AtomicText (Join-Path $runDirectory 'proof-b.md') $proofBReport
 
     Write-Host 'Starting Codex final validator...'
-    $validationMaterial = "===== REVIEW A =====`n$($blindResults[0].Report)===== REVIEW B =====`n$($blindResults[1].Report)===== COMPARISON =====`n$($comparison.Report)===== PROOF A =====`n$proofAReport===== PROOF B =====`n$proofBReport"
-    $validationPrompt = New-Prompt 'FINAL VALIDATOR' $guide $rules $guardrails $target $validationMaterial
+    $validationMaterial = "===== GENERATED REVIEW A =====`n$reviewA===== GENERATED REVIEW B =====`n$reviewB===== COMPARISON =====`n$($comparison.Report)===== PROOF A =====`n$proofAReport===== PROOF B =====`n$proofBReport"
+    $validationPrompt = New-Prompt 'FINAL VALIDATOR' $guide $rules $guardrails $target $staging $validationMaterial
     $validationDir = New-RoleDirectory $privateRoot 'validator'
     $validation = Invoke-OneRole 'codex' 'validator' $validationDir $validationPrompt $claudeCli $codexCli $inputDirectories
     Assert-InputsUnchanged $state
-    Write-AtomicText (Join-Path $runDirectory 'final-report.md') $validation.Report
-    if ($validation.Status -eq 'USER_DECISION_REQUIRED') { $status = $validation.Status }
+    Assert-StagingUnchanged $state
+    if ($validation.Status -eq 'USER_DECISION_REQUIRED') {
+        $publicDecision = [regex]::Replace($validation.Report, '(?s)BEGIN PLACEMENT MANIFEST.*$', '').TrimEnd() + "`n"
+        Write-AtomicText (Join-Path $runDirectory 'user-decision.md') $publicDecision
+        $status = $validation.Status
+    }
     elseif ($validation.Status -eq 'COMPLETE') {
-        $manifestMatch = [regex]::Match($validation.Report, '(?s)BEGIN STAGE1 MANIFEST\s*(.*?)\s*END STAGE1 MANIFEST')
-        if (-not $manifestMatch.Success -or [string]::IsNullOrWhiteSpace($manifestMatch.Groups[1].Value)) { throw 'Final validator omitted the Stage 1 manifest.' }
-        $manifestPath = Join-Path $runDirectory 'stage1-manifest.tsv'
-        Write-AtomicText $manifestPath ($manifestMatch.Groups[1].Value.Trim() + "`n")
+        $finalPacket = Get-PrivatePlacement $validation.Report $validationDir
+        $finalReviewPath = Join-Path $runDirectory 'final-review.md'
         Assert-InputsUnchanged $state
-        $checkLog = @(& $splitter -Source $target -Manifest $manifestPath -OutDir (Join-Path $runDirectory 'staging') -CheckOnly 6>&1 2>&1)
-        Write-AtomicText (Join-Path $runDirectory 'splitter-check.txt') (($checkLog -join "`n").TrimEnd() + "`n")
+        Assert-StagingUnchanged $state
+        Invoke-Splitter -Label 'splitter-check-final' -Manifest $finalPacket.Manifest -SplitText $finalPacket.SplitText -ReviewOutput $finalReviewPath -RunDirectory $runDirectory -StageRoot $staging -CheckOnly
         Assert-InputsUnchanged $state
-        $stageLog = @(& $splitter -Source $target -Manifest $manifestPath -OutDir (Join-Path $runDirectory 'staging') 6>&1 2>&1)
-        Write-AtomicText (Join-Path $runDirectory 'splitter-stage.txt') (($stageLog -join "`n").TrimEnd() + "`n")
+        Assert-StagingUnchanged $state
+        Invoke-Splitter -Label 'splitter-stage-final' -Manifest $finalPacket.Manifest -SplitText $finalPacket.SplitText -ReviewOutput $finalReviewPath -RunDirectory $runDirectory -StageRoot $staging -ApplyStaging
+        Assert-InputsUnchanged $state
+
+        Write-Host 'Starting fresh Codex staging verifier...'
+        $verifierMaterial = "FINAL GENERATED REVIEW PATH: $finalReviewPath`nSTAGING CONTRACT TREE PATH: $staging"
+        $verifierPrompt = New-Prompt 'STAGING VERIFIER' $guide $rules $guardrails $target $staging $verifierMaterial
+        $verifierDir = New-RoleDirectory $privateRoot 'verifier'
+        $verifier = Invoke-OneRole 'codex' 'verifier' $verifierDir $verifierPrompt $claudeCli $codexCli ($inputDirectories + $runDirectory | Sort-Object -Unique)
+        if ($verifier.Status -ne 'VERIFIED') { throw "Staging verifier returned unexpected status: $($verifier.Status)" }
+        Write-AtomicText (Join-Path $runDirectory 'staging-verification.md') $verifier.Report
         $status = 'COMPLETE'
     } else { throw "Final validator returned unexpected status: $($validation.Status)" }
 } catch {
