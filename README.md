@@ -8,7 +8,8 @@ A small, read-only loop for independent contract review:
 - one watcher;
 - two blind CLI reviewers;
 - one Codex comparator and final validator;
-- an isolated destination-review mode for approved Phase 1 staging.
+- an isolated destination-review mode for approved Phase 1 staging;
+- an isolated Phase 2 exact-copy mode with one fresh Codex verifier.
 
 The watcher accepts no ticket and no free-form brief. Both blind reviewers read the same
 existing guide, rules, guardrails, and source contract through the same exact full paths.
@@ -83,6 +84,38 @@ destination. The final validator returns the epic's ordered `COPY`, `RENAME`, `S
 `DELETE`, and `NEW` manifest. The materializer checks complete line coverage first and
 then creates `staging/destination.md`; it never creates or edits the final destination.
 
+## Phase 2 exact copy
+
+After the human approves the complete Phase 1 staging set, put one row per final contract
+between `BEGIN PHASE2 COPY MANIFEST` and `END PHASE2 COPY MANIFEST`:
+
+```text
+COPY<TAB><exact-full-staging-path><TAB><contracts/.../NAME_CONTRACT.md><TAB><lowercase-sha256>
+```
+
+Print the one-time Phase 2 approval phrase:
+
+```powershell
+./Start-ContractReview.ps1 `
+  -Phase2 `
+  -RunId steamcmd-phase2-001 `
+  -GuidePath <path-to-contract-epic.md> `
+  -RulesPath <path-to-AI_RULES.md> `
+  -GuardrailsPath <path-to-AI_GUARDRAILS.md> `
+  -Phase2ManifestPath <path-to-approved-phase2-manifest.md> `
+  -OutputRoot <exact-new-contract-tree-path> `
+  -CopierPath ./Copy-ApprovedContracts.ps1 `
+  -ShowApproval
+```
+
+Run the same command with
+`-Approval 'APPROVE CONTRACT APPLY steamcmd-phase2-001 <hash>'` after the human supplies
+that exact phrase. The copier first performs a no-write check, then creates a sibling
+temporary tree, verifies every byte, and atomically renames it to the new output root.
+One fresh read-only Codex session independently verifies the complete file list, paths,
+mapping, and byte equality. `BLOCKED` retains the tree and evidence and never repairs it.
+Original contracts and approved Phase 1 staging files are never edited.
+
 ## What happens
 
 1. Claude and Codex read the same shared inputs and review concurrently and blind. In
@@ -120,5 +153,6 @@ pwsh -NoLogo -NoProfile -NonInteractive -File ./tests/PublicRepository.Tests.ps1
 
 Tests use fake CLIs and a fake source splitter. They verify shared exact input paths,
 isolated output directories, path-bound approval, verbatim staging, complete destination
-coverage, all five destination operations, and retained logs without launching Claude or
+coverage, all five destination operations, exact Phase 2 LF/CRLF copies, strict safe
+destinations, retained `BLOCKED` evidence, and retained logs without launching Claude or
 Codex.

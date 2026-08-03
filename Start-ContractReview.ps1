@@ -11,6 +11,10 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'DestinationReview')][string]$IncomingPath,
     [Parameter(Mandatory = $true, ParameterSetName = 'DestinationReview')][string]$DestinationPath,
     [Parameter(Mandatory = $true, ParameterSetName = 'DestinationReview')][string]$MaterializerPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Phase2')][switch]$Phase2,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Phase2')][string]$Phase2ManifestPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Phase2')][string]$OutputRoot,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Phase2')][string]$CopierPath,
     [string]$Approval,
     [switch]$ShowApproval,
     [switch]$AllCodex,
@@ -377,6 +381,28 @@ function Write-Receipt {
 $($artifactLines -join "`n")
 "@
     Write-AtomicText (Join-Path $RunDirectory 'receipt.md') ($text.TrimEnd() + "`n")
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'Phase2') {
+    $phase2ModulePath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'ContractReview.Phase2.ps1')).Path
+    . $phase2ModulePath
+    $phase2Result = Invoke-ContractPhase2 `
+        -RunIdentifier $RunId `
+        -Guide $GuidePath `
+        -Rules $RulesPath `
+        -Guardrails $GuardrailsPath `
+        -Manifest $Phase2ManifestPath `
+        -FinalOutputRoot $OutputRoot `
+        -Copier $CopierPath `
+        -ApprovalPhrase $Approval `
+        -PrintApproval:$ShowApproval `
+        -CodexCliCommand $CodexCommand `
+        -RunsDirectory $RunsRoot `
+        -WatcherPath $PSCommandPath `
+        -ModulePath $phase2ModulePath `
+        -Processes $activeProcesses
+    Write-Output $phase2Result.Output
+    exit $phase2Result.ExitCode
 }
 
 if ($PSCmdlet.ParameterSetName -eq 'DestinationReview') {
