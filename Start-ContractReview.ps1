@@ -331,9 +331,19 @@ function Wait-ParallelRoles {
             if ($results.Count -lt 2) { Start-Sleep -Milliseconds 100 }
         }
     } catch {
-        Stop-RoleProcess $First
-        Stop-RoleProcess $Second
-        throw
+        $primaryError = $_.Exception
+        $cleanupErrors = [Collections.Generic.List[string]]::new()
+        foreach ($role in @($First, $Second)) {
+            try { Stop-RoleProcess $role }
+            catch { $cleanupErrors.Add("$($role.Slot): $($_.Exception.Message)") }
+        }
+        if ($cleanupErrors.Count -gt 0) {
+            throw [InvalidOperationException]::new(
+                "$($primaryError.Message)`nCleanup failed: $($cleanupErrors -join '; ')",
+                $primaryError
+            )
+        }
+        throw $primaryError
     }
     @($results[$First.Slot], $results[$Second.Slot])
 }
