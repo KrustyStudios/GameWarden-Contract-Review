@@ -119,7 +119,7 @@ File list: VERIFIED | MISMATCH
 Paths: VERIFIED | MISMATCH
 Byte equality: VERIFIED | MISMATCH
 Approved mapping: VERIFIED | MISMATCH
-Evidence: <specific evidence>
+Evidence: <exact paths and SHA-256 hashes, or the exact mismatch>
 "@
 }
 

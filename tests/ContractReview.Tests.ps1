@@ -135,7 +135,9 @@ try {
         Assert-True ($failure.Output -match 'deliberate reviewer failure') "Original provider error was hidden on attempt $attempt."
         Assert-True (-not (Test-Path (Join-Path $failureLog 'comparator.start'))) "Comparator started after blind-review failure on attempt $attempt."
         Assert-True (-not (Test-Path (Join-Path $failureRuns "$failureRunId\private"))) "Failure retained a private directory on attempt $attempt."
-        Assert-True (Test-Path (Join-Path $failureRuns "$failureRunId\failure.txt")) "Failure evidence was not retained on attempt $attempt."
+        $failureEvidencePath = Join-Path $failureRuns "$failureRunId\failure.txt"
+        Assert-True (Test-Path $failureEvidencePath) "Failure evidence was not retained on attempt $attempt."
+        Assert-True ((Get-Content $failureEvidencePath -Raw) -match 'deliberate reviewer failure') "Failure evidence hid the original provider error on attempt $attempt."
         $childPid = [int](Get-Content (Join-Path $failureLog 'blind-B.child-pid') -Raw)
         Assert-True (-not (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) "Stopped peer left a child process running on attempt $attempt."
     }

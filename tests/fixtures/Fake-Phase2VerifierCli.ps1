@@ -52,8 +52,16 @@ function Test-FakePhase2BytesEqual {
     $true
 }
 
+function Get-FakePhase2Hash {
+    param([byte[]]$Bytes)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { ([Convert]::ToHexString($sha.ComputeHash($Bytes))).ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
 $mismatch = $false
 $expectedOutputs = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$evidenceParts = [Collections.Generic.List[string]]::new()
 for ($index = 0; $index -lt $stagingMatches.Count; $index++) {
     if ($stagingMatches[$index].Groups[1].Value -cne $outputMatches[$index].Groups[1].Value) {
         throw 'Prompt mapping row numbers do not match.'
@@ -63,9 +71,15 @@ for ($index = 0; $index -lt $stagingMatches.Count; $index++) {
     if (-not (Test-Path -LiteralPath $stagingPath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
         $mismatch = $true
+        $evidenceParts.Add("missing staging=$stagingPath or output=$outputPath")
         continue
     }
-    if (-not (Test-FakePhase2BytesEqual ([IO.File]::ReadAllBytes($stagingPath)) ([IO.File]::ReadAllBytes($outputPath)))) {
+    $stagingBytes = [IO.File]::ReadAllBytes($stagingPath)
+    $outputBytes = [IO.File]::ReadAllBytes($outputPath)
+    $stagingHash = Get-FakePhase2Hash $stagingBytes
+    $outputHash = Get-FakePhase2Hash $outputBytes
+    $evidenceParts.Add("staging=$stagingPath sha256=$stagingHash output=$outputPath sha256=$outputHash")
+    if (-not (Test-FakePhase2BytesEqual $stagingBytes $outputBytes)) {
         $mismatch = $true
     }
     [void]$expectedOutputs.Add((Resolve-Path -LiteralPath $outputPath).Path)
@@ -73,17 +87,19 @@ for ($index = 0; $index -lt $stagingMatches.Count; $index++) {
 $actualOutputs = @(Get-ChildItem -LiteralPath $outputRoot -Recurse -File | ForEach-Object FullName)
 if ($actualOutputs.Count -ne $expectedOutputs.Count) { $mismatch = $true }
 foreach ($actualOutput in $actualOutputs) {
-    if (-not $expectedOutputs.Contains($actualOutput)) { $mismatch = $true }
+    if (-not $expectedOutputs.Contains($actualOutput)) {
+        $mismatch = $true
+        $evidenceParts.Add("unexpected output=$actualOutput")
+    }
 }
 
-if ($scenario -eq 'blocked') { $mismatch = $true }
+if ($scenario -eq 'blocked') {
+    $mismatch = $true
+    $evidenceParts.Add('exact mismatch=deliberate blocked test scenario')
+}
 $status = if ($mismatch) { 'BLOCKED' } else { 'VERIFIED' }
 $check = if ($mismatch) { 'MISMATCH' } else { 'VERIFIED' }
-$evidence = if ($mismatch) {
-    'The verifier observed the deliberate blocked test scenario or an output difference.'
-} else {
-    "All $($stagingMatches.Count) approved staging/output pairs and the complete file list match exactly."
-}
+$evidence = $evidenceParts -join '; '
 $report = @(
     "STATUS: $status"
     '# Phase 2 verification'
