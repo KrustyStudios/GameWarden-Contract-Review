@@ -132,7 +132,8 @@ ROLE: $Role
 
 Read each exact input path below in full. Use only those files and the role material in
 this prompt. Use tools only to read the listed files. Do not change an input or inspect
-other files. Return only the Markdown report required for this role.
+other files. Return only the exact role output required by the guide. The first line must
+begin with STATUS:. Do not wrap the response in a Markdown code fence.
 
 GUIDE PATH: $Guide
 RULES PATH: $Rules
