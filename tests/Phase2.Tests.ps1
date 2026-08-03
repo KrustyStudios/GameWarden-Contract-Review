@@ -179,6 +179,11 @@ try {
     }
     Assert-Phase2True (-not $prompt.Contains('[ALPHA-RULE]', [StringComparison]::Ordinal)) 'Phase 2 prompt inlined contract contents.'
     Assert-Phase2True (-not $prompt.Contains('phase2-success', [StringComparison]::Ordinal)) 'Phase 2 prompt included run metadata.'
+    Assert-Phase2True ($prompt.Contains('Evidence: <exact paths and SHA-256 hashes, or the exact mismatch>', [StringComparison]::Ordinal)) 'Phase 2 prompt weakened the epic evidence requirement.'
+    $verificationReport = [IO.File]::ReadAllText((Join-Path $runDirectory 'verification.md'))
+    foreach ($evidenceValue in @($stagingA, $finalA, (Get-Phase2TestHash $stagingA), $stagingB, $finalB, (Get-Phase2TestHash $stagingB))) {
+        Assert-Phase2True ($verificationReport.Contains($evidenceValue, [StringComparison]::Ordinal)) "Phase 2 verification omitted exact path/hash evidence: $evidenceValue"
+    }
 
     $checkOnlyRoot = Join-Path $tempRoot 'check-only-output'
     $checkOnly = Invoke-Phase2Copier -ManifestFile $manifestPath -FinalRoot $checkOnlyRoot -CheckOnly
@@ -235,6 +240,7 @@ try {
     Assert-Phase2True (Test-Path -LiteralPath $blockedRoot -PathType Container) 'Phase 2 BLOCKED removed the copied output tree.'
     $blockedRun = Join-Path $runsRoot 'phase2-blocked'
     Assert-Phase2True ((Get-Content -LiteralPath (Join-Path $blockedRun 'verification.md') -Raw) -match '^STATUS: BLOCKED') 'Phase 2 BLOCKED report was not retained.'
+    Assert-Phase2True ((Get-Content -LiteralPath (Join-Path $blockedRun 'verification.md') -Raw) -match 'exact mismatch=deliberate blocked test scenario') 'Phase 2 BLOCKED report omitted the exact mismatch.'
     Assert-Phase2True ((Get-Content -LiteralPath (Join-Path $blockedRun 'receipt.md') -Raw) -match 'Status: BLOCKED') 'Phase 2 BLOCKED receipt was not retained.'
     Assert-Phase2True (-not (Test-Path -LiteralPath (Join-Path $blockedRun 'private'))) 'Phase 2 BLOCKED retained the private verifier directory.'
     Assert-Phase2True (
