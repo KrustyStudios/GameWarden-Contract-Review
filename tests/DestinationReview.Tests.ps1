@@ -176,25 +176,25 @@ try {
     $directOutput = Join-Path $directRoot 'output.md'
     [IO.File]::WriteAllBytes($directIncoming, [Text.Encoding]::UTF8.GetBytes("[OLD]`r`ncopy-in`nsplit-source`r`ndelete-in`n"))
     [IO.File]::WriteAllBytes($directDestination, [Text.Encoding]::UTF8.GetBytes("dest-copy`r`ndest-delete`n"))
-    $directPacketText = @"
-STATUS: COMPLETE
-BEGIN DESTINATION MANIFEST
-NEW`t-`t-`theader
-COPY`t$directDestination`t1-1
-DELETE`t$directDestination`t2-2`tcontracts/shared/SURVIVOR_CONTRACT.md`t[SURVIVOR]
-RENAME`t$directIncoming`t1-1`t[OLD]`t[NEW]
-COPY`t$directIncoming`t2-2
-SPLIT`t$directIncoming`t3-3`tsplit-body
-DELETE`t$directIncoming`t4-4`tcontracts/shared/SURVIVOR_CONTRACT.md`t[SURVIVOR]
-END DESTINATION MANIFEST
-BEGIN DESTINATION TEXT header
-# Combined
-END DESTINATION TEXT header
-BEGIN DESTINATION TEXT split-body
-split-a`r
-split-b
-END DESTINATION TEXT split-body
-"@
+    $directPacketText = (@(
+        'STATUS: COMPLETE'
+        'BEGIN DESTINATION MANIFEST'
+        "NEW`t-`t-`theader"
+        "COPY`t$directDestination`t1-1"
+        "DELETE`t$directDestination`t2-2`tcontracts/shared/SURVIVOR_CONTRACT.md`t[SURVIVOR]"
+        "RENAME`t$directIncoming`t1-1`t[OLD]`t[NEW]"
+        "COPY`t$directIncoming`t2-2"
+        "SPLIT`t$directIncoming`t3-3`tsplit-body"
+        "DELETE`t$directIncoming`t4-4`tcontracts/shared/SURVIVOR_CONTRACT.md`t[SURVIVOR]"
+        'END DESTINATION MANIFEST'
+        'BEGIN DESTINATION TEXT header'
+        '# Combined'
+        'END DESTINATION TEXT header'
+        'BEGIN DESTINATION TEXT split-body'
+        "split-a`r"
+        'split-b'
+        'END DESTINATION TEXT split-body'
+    ) -join "`n") + "`n"
     [IO.File]::WriteAllText($directPacket, $directPacketText, $utf8)
     $check = Invoke-DestinationMaterializer -IncomingFile $directIncoming -DestinationFile $directDestination -PacketFile $directPacket -OutputFile $directOutput -CheckOnly
     Assert-DestinationTrue ($check.ExitCode -eq 0) "Direct materializer check failed: $($check.Output)"
@@ -216,41 +216,41 @@ END DESTINATION TEXT split-body
 
     $badRenamePacket = Join-Path $directRoot 'bad-rename-packet.md'
     $badRenameOutput = Join-Path $directRoot 'bad-rename-output.md'
-    $badRenameText = @"
-BEGIN DESTINATION MANIFEST
-COPY`t$directDestination`t1-2
-RENAME`t$directIncoming`t1-1`t[MISSING]`t[NEW]
-COPY`t$directIncoming`t2-4
-END DESTINATION MANIFEST
-"@
+    $badRenameText = (@(
+        'BEGIN DESTINATION MANIFEST'
+        "COPY`t$directDestination`t1-2"
+        "RENAME`t$directIncoming`t1-1`t[MISSING]`t[NEW]"
+        "COPY`t$directIncoming`t2-4"
+        'END DESTINATION MANIFEST'
+    ) -join "`n") + "`n"
     [IO.File]::WriteAllText($badRenamePacket, $badRenameText, $utf8)
     $badRename = Invoke-DestinationMaterializer -IncomingFile $directIncoming -DestinationFile $directDestination -PacketFile $badRenamePacket -OutputFile $badRenameOutput -CheckOnly
     Assert-DestinationTrue ($badRename.ExitCode -ne 0 -and $badRename.Output -match 'exactly once') 'Materializer accepted a RENAME whose old tag was absent.'
 
     $unnamedDeletePacket = Join-Path $directRoot 'unnamed-delete-packet.md'
     $unnamedDeleteOutput = Join-Path $directRoot 'unnamed-delete-output.md'
-    $unnamedDeleteText = @"
-BEGIN DESTINATION MANIFEST
-COPY`t$directDestination`t1-2
-COPY`t$directIncoming`t1-3
-DELETE`t$directIncoming`t4-4`tcontracts/shared/SURVIVOR_CONTRACT.md
-END DESTINATION MANIFEST
-"@
+    $unnamedDeleteText = (@(
+        'BEGIN DESTINATION MANIFEST'
+        "COPY`t$directDestination`t1-2"
+        "COPY`t$directIncoming`t1-3"
+        "DELETE`t$directIncoming`t4-4`tcontracts/shared/SURVIVOR_CONTRACT.md"
+        'END DESTINATION MANIFEST'
+    ) -join "`n") + "`n"
     [IO.File]::WriteAllText($unnamedDeletePacket, $unnamedDeleteText, $utf8)
     $unnamedDelete = Invoke-DestinationMaterializer -IncomingFile $directIncoming -DestinationFile $directDestination -PacketFile $unnamedDeletePacket -OutputFile $unnamedDeleteOutput -CheckOnly
     Assert-DestinationTrue ($unnamedDelete.ExitCode -ne 0 -and $unnamedDelete.Output -match 'requires exactly 5') 'Materializer accepted DELETE without a complete named survivor.'
 
     $extraBlockPacket = Join-Path $directRoot 'extra-block-packet.md'
     $extraBlockOutput = Join-Path $directRoot 'extra-block-output.md'
-    $extraBlockText = @"
-BEGIN DESTINATION MANIFEST
-COPY`t$directDestination`t1-2
-COPY`t$directIncoming`t1-4
-END DESTINATION MANIFEST
-BEGIN DESTINATION TEXT unused
-unused
-END DESTINATION TEXT unused
-"@
+    $extraBlockText = (@(
+        'BEGIN DESTINATION MANIFEST'
+        "COPY`t$directDestination`t1-2"
+        "COPY`t$directIncoming`t1-4"
+        'END DESTINATION MANIFEST'
+        'BEGIN DESTINATION TEXT unused'
+        'unused'
+        'END DESTINATION TEXT unused'
+    ) -join "`n") + "`n"
     [IO.File]::WriteAllText($extraBlockPacket, $extraBlockText, $utf8)
     $extraBlock = Invoke-DestinationMaterializer -IncomingFile $directIncoming -DestinationFile $directDestination -PacketFile $extraBlockPacket -OutputFile $extraBlockOutput -CheckOnly
     Assert-DestinationTrue ($extraBlock.ExitCode -ne 0 -and $extraBlock.Output -match 'unreferenced') 'Materializer accepted an unreferenced text block.'
@@ -258,15 +258,15 @@ END DESTINATION TEXT unused
     $newDestination = Join-Path $directRoot 'new-contract.md'
     $newPacket = Join-Path $directRoot 'new-packet.md'
     $newOutput = Join-Path $directRoot 'new-output.md'
-    $newText = @"
-BEGIN DESTINATION MANIFEST
-NEW`t-`t-`theader
-COPY`t$directIncoming`t1-4
-END DESTINATION MANIFEST
-BEGIN DESTINATION TEXT header
-# New contract
-END DESTINATION TEXT header
-"@
+    $newText = (@(
+        'BEGIN DESTINATION MANIFEST'
+        "NEW`t-`t-`theader"
+        "COPY`t$directIncoming`t1-4"
+        'END DESTINATION MANIFEST'
+        'BEGIN DESTINATION TEXT header'
+        '# New contract'
+        'END DESTINATION TEXT header'
+    ) -join "`n") + "`n"
     [IO.File]::WriteAllText($newPacket, $newText, $utf8)
     $newResult = Invoke-DestinationMaterializer -IncomingFile $directIncoming -DestinationFile $newDestination -PacketFile $newPacket -OutputFile $newOutput
     Assert-DestinationTrue ($newResult.ExitCode -eq 0) "New-destination materialization failed: $($newResult.Output)"
