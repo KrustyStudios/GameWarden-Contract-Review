@@ -53,7 +53,17 @@ if ($slot -like 'blind-*') {
 }
 
 $sourcePath = $inputPaths['SOURCE CONTRACT']
-$lineCount = [IO.File]::ReadAllLines($sourcePath).Count
+$sourceMapMatch = [regex]::Match($prompt, '(?ms)^BEGIN SOURCE BLOCK MAP\r?\n(.*?)^END SOURCE BLOCK MAP$')
+$sourceBlockIds = @(
+    if ($sourceMapMatch.Success) {
+        foreach ($match in [regex]::Matches($sourceMapMatch.Groups[1].Value, '(?m)^(B-[a-f0-9]{16}(?:-[2-9][0-9]*)?)\t')) {
+            $match.Groups[1].Value
+        }
+    }
+)
+$needsPlacement = $slot -in @('blind-A', 'blind-B', 'validator')
+if ($needsPlacement -and $sourceBlockIds.Count -eq 0) { throw 'Prompt omitted the source block map.' }
+$wholeSource = if ($sourceBlockIds.Count -gt 0) { "$($sourceBlockIds[0])..$($sourceBlockIds[-1])" } else { '' }
 $contractsMarker = "$([IO.Path]::DirectorySeparatorChar)contracts$([IO.Path]::DirectorySeparatorChar)"
 $contractsIndex = $sourcePath.IndexOf($contractsMarker, [StringComparison]::OrdinalIgnoreCase)
 if ($contractsIndex -lt 0) { throw "Source path is not under contracts/: $sourcePath" }
@@ -61,10 +71,10 @@ $destination = $sourcePath.Substring($contractsIndex + 1).Replace('\', '/')
 
 $report = switch -Wildcard ($slot) {
     'blind-A' {
-        "STATUS: OK`nBEGIN PLACEMENT MANIFEST`n1-$lineCount`t$destination`t[EXAMPLE-RULE]`tMOVE`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
+        "STATUS: OK`nBEGIN PLACEMENT MANIFEST`n$wholeSource`t$destination`t[EXAMPLE-RULE]`tMOVE`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
     }
     'blind-B' {
-        "STATUS: OK`nBEGIN PLACEMENT MANIFEST`n1-1`t$destination`tdocument framing`tMOVE`t-`n2-$lineCount`t$destination`t[EXAMPLE-RULE]`tMOVE`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
+        "STATUS: OK`nBEGIN PLACEMENT MANIFEST`n$($sourceBlockIds[0])..$($sourceBlockIds[0])`t$destination`tdocument framing`tMOVE`t-`n$($sourceBlockIds[1])..$($sourceBlockIds[-1])`t$destination`t[EXAMPLE-RULE]`tMOVE`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
     }
     'comparator' {
         "STATUS: OK`n# Comparison`n## Inventory and granularity`nA has one rule block; B has two. They group the same source differently.`n## Agreements`nBoth use $destination and [example].`n## Differences and resolutions`nThe framing boundary needs proof.`nBEGIN PROOF REQUESTS`nA and B must prove whether '# Example' is framing or part of [EXAMPLE-RULE].`nEND PROOF REQUESTS`n"
@@ -73,7 +83,7 @@ $report = switch -Wildcard ($slot) {
         "STATUS: OK`n# Proof response`n## $destination / [example] / '# Example'`nResult: PROVED`nEvidence: '# Example' is separate framing above [EXAMPLE-RULE].`n"
     }
     'validator' {
-        "STATUS: COMPLETE`n# Final validation`n## Resolutions`nKeep framing and the tagged rule together in one placement.`n## User decisions`nNONE`nBEGIN PLACEMENT MANIFEST`n1-$lineCount`t$destination`t[EXAMPLE-RULE]`tMOVE`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
+        "STATUS: COMPLETE`n# Final validation`n## Resolutions`nKeep framing and the tagged rule together in one placement.`n## User decisions`nNONE`nBEGIN PLACEMENT MANIFEST`n$wholeSource`t$destination`t[EXAMPLE-RULE]`tMOVE`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
     }
     'verifier' {
         if ($scenario -eq 'block-verifier') {
