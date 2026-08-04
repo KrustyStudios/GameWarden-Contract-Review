@@ -71,10 +71,10 @@ $destination = $sourcePath.Substring($contractsIndex + 1).Replace('\', '/')
 
 $report = switch -Wildcard ($slot) {
     'blind-A' {
-        "STATUS: OK`nBEGIN PLACEMENT MANIFEST`n$wholeSource`t$destination`t[EXAMPLE-RULE]`tMOVE`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
+        "STATUS: OK`nBEGIN PLACEMENT MANIFEST`nMOVE`t$wholeSource`t$destination`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
     }
     'blind-B' {
-        "STATUS: OK`nBEGIN PLACEMENT MANIFEST`n$($sourceBlockIds[0])..$($sourceBlockIds[0])`t$destination`tdocument framing`tMOVE`t-`n$($sourceBlockIds[1])..$($sourceBlockIds[-1])`t$destination`t[EXAMPLE-RULE]`tMOVE`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
+        "STATUS: OK`nBEGIN PLACEMENT MANIFEST`nMOVE`t$($sourceBlockIds[0])..$($sourceBlockIds[0])`t$destination`t-`nMOVE`t$($sourceBlockIds[1])..$($sourceBlockIds[-1])`t$destination`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
     }
     'comparator' {
         "STATUS: OK`n# Comparison`n## Inventory and granularity`nA has one rule block; B has two. They group the same source differently.`n## Agreements`nBoth use $destination and [example].`n## Differences and resolutions`nThe framing boundary needs proof.`nBEGIN PROOF REQUESTS`nA and B must prove whether '# Example' is framing or part of [EXAMPLE-RULE].`nEND PROOF REQUESTS`n"
@@ -83,7 +83,7 @@ $report = switch -Wildcard ($slot) {
         "STATUS: OK`n# Proof response`n## $destination / [example] / '# Example'`nResult: PROVED`nEvidence: '# Example' is separate framing above [EXAMPLE-RULE].`n"
     }
     'validator' {
-        "STATUS: COMPLETE`n# Final validation`n## Resolutions`nKeep framing and the tagged rule together in one placement.`n## User decisions`nNONE`nBEGIN PLACEMENT MANIFEST`n$wholeSource`t$destination`t[EXAMPLE-RULE]`tMOVE`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
+        "STATUS: COMPLETE`n# Final validation`n## Resolutions`nKeep framing and the tagged rule together in one placement.`n## User decisions`nNONE`nBEGIN PLACEMENT MANIFEST`nMOVE`t$wholeSource`t$destination`t[example]`nEND PLACEMENT MANIFEST`nBEGIN SPLIT TEXT`nNONE`nEND SPLIT TEXT`n"
     }
     'verifier' {
         if ($scenario -eq 'block-verifier') {
