@@ -41,17 +41,22 @@ $destination = $null
 $entries = [Collections.Generic.List[string]]::new()
 foreach ($row in $rows) {
     $fields = $row.Split([char]9)
-    if ($fields.Count -ne 5 -or $fields[0] -notmatch '^(B-[a-f0-9]{16}(?:-[2-9][0-9]*)?)\.\.(B-[a-f0-9]{16}(?:-[2-9][0-9]*)?)$') { throw 'fake splitter: invalid MOVE row' }
+    if ($fields.Count -ne 4 -or $fields[0] -ne 'MOVE' -or $fields[1] -notmatch '^(B-[a-f0-9]{16}(?:-[2-9][0-9]*)?)\.\.(B-[a-f0-9]{16}(?:-[2-9][0-9]*)?)$') { throw 'fake splitter: invalid MOVE row' }
     if (-not $blockById.ContainsKey($Matches[1]) -or -not $blockById.ContainsKey($Matches[2])) { throw 'fake splitter: unknown source block ID' }
     $start = $blockById[$Matches[1]]
     $end = $blockById[$Matches[2]]
     if ($start.Index -ne $cursor -or $end.Index -lt $start.Index) { throw 'fake splitter: placements do not tile the source' }
     $cursor = $end.Index + 1
-    if ($fields[1] -notmatch '^contracts/.+_CONTRACT\.md$' -or $fields[1] -match '(^|/)\.\.(/|$)') { throw 'fake splitter: unsafe destination' }
-    if ($null -eq $destination) { $destination = $fields[1] }
-    elseif ($destination -ne $fields[1]) { throw 'fake splitter fixture supports one destination' }
+    if ($fields[2] -notmatch '^contracts/.+_CONTRACT\.md$' -or $fields[2] -match '(^|/)\.\.(/|$)') { throw 'fake splitter: unsafe destination' }
+    if ($null -eq $destination) { $destination = $fields[2] }
+    elseif ($destination -ne $fields[2]) { throw 'fake splitter fixture supports one destination' }
     $entry = ($lines[$start.Line..$end.Line] -join "`n") + "`n"
-    if ($fields[4] -ne '-' -and $fields[2] -match '^\[') { $entry = $entry.Replace($fields[2], $fields[4]) }
+    $sourceTags = @($lines[$start.Line..$end.Line] | Where-Object { $_ -match '^\[[^\]\r\n\t]+\]$' })
+    if ($sourceTags.Count -gt 1) { throw 'fake splitter: source selection has multiple tags' }
+    if ($fields[3] -ne '-') {
+        if ($sourceTags.Count -eq 1) { $entry = $entry.Replace($sourceTags[0], $fields[3]) }
+        else { $entry = $fields[3] + "`n" + $entry }
+    }
     $entries.Add($entry)
 }
 if ($cursor -ne $blocks.Count) { throw 'fake splitter: placements do not cover the complete source' }
