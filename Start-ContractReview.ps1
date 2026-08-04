@@ -90,6 +90,7 @@ function Get-ApprovalPhrase {
         "guardrails-hash=$($State.GuardrailsHash)"
         "source-path=$($State.TargetPath)"
         "source-hash=$($State.TargetHash)"
+        "source-map-hash=$($State.SourceMapHash)"
         "staging-root=$($State.StagingRootPath)"
         "staging-hash=$($State.InitialStagingHash)"
         "watcher-path=$($State.WatcherPath)"
@@ -125,8 +126,18 @@ function New-Prompt {
         [string]$Guardrails,
         [string]$Target,
         [string]$Staging,
+        [string]$SourceMap = '',
         [string]$Material = ''
     )
+    $sourceMapSection = if ([string]::IsNullOrWhiteSpace($SourceMap)) { '' } else {
+@"
+The script generated the source block map below from the exact source bytes. When this
+role returns a placement manifest, copy its block IDs exactly. The first field is
+START_BLOCK_ID..END_BLOCK_ID. Do not calculate or return source line numbers.
+
+$SourceMap
+"@
+    }
     @"
 ROLE: $Role
 
@@ -141,10 +152,21 @@ GUARDRAILS PATH: $Guardrails
 SOURCE CONTRACT PATH: $Target
 STAGING CONTRACT TREE PATH: $Staging
 
+$sourceMapSection
 ===== ROLE MATERIAL =====
 $Material
 ===== END INPUT =====
 "@
+}
+
+function Get-SourceMap {
+    param([string]$Splitter, [string]$Target)
+    $output = @(& $Splitter -Source $Target -PrintSourceMap 6>&1 2>&1)
+    $text = (($output | ForEach-Object { [string]$_ }) -join "`n").TrimEnd() + "`n"
+    if ($text -notmatch '(?ms)^BEGIN SOURCE BLOCK MAP\r?\n(?:B-[a-f0-9]{16}(?:-[2-9][0-9]*)?\t[^\r\n]*\r?\n)+END SOURCE BLOCK MAP\r?\n$') {
+        throw "Splitter returned an invalid source block map.`n$text"
+    }
+    return $text
 }
 
 function Assert-InputsUnchanged {
@@ -160,6 +182,10 @@ function Assert-InputsUnchanged {
         if ((Get-FileHashValue $input.Path) -ne $input.Hash) {
             throw "$($input.Label) changed during review: $($input.Path)"
         }
+    }
+    $currentSourceMapHash = Get-BytesHash ([Text.Encoding]::UTF8.GetBytes((Get-SourceMap $State.SplitterPath $State.TargetPath)))
+    if ($currentSourceMapHash -ne $State.SourceMapHash) {
+        throw "Source block map changed during review: $($State.TargetPath)"
     }
 }
 
@@ -442,6 +468,7 @@ function Write-Receipt {
 - Rules: $($State.RulesPath) — $($State.RulesHash)
 - Guardrails: $($State.GuardrailsPath) — $($State.GuardrailsHash)
 - Source: $($State.TargetPath) — $($State.TargetHash)
+- Source block map: $($State.SourceMapHash)
 - Staging tree before: $($State.StagingRootPath) — $($State.InitialStagingHash)
 - Staging tree after: $($State.StagingRootPath) — $(Get-TreeHashValue $State.StagingRootPath)
 - Watcher: $($State.WatcherPath) — $($State.WatcherHash)
@@ -493,6 +520,7 @@ $staging = (Resolve-Path -LiteralPath $StagingRoot -ErrorAction Stop).Path
 if (-not (Test-Path -LiteralPath $staging -PathType Container)) { throw "Staging tree not found: $StagingRoot" }
 if ((Get-Item -LiteralPath $staging -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Staging tree cannot be a reparse point: $staging" }
 $splitter = Resolve-LeafPath $SplitterPath 'Splitter'
+$sourceMap = Get-SourceMap $splitter $target
 $watcher = (Resolve-Path -LiteralPath $PSCommandPath).Path
 $codexCli = Resolve-CommandPath $CodexCommand 'Codex'
 $claudeCli = if ($AllCodex) { $codexCli } else { Resolve-CommandPath $ClaudeCommand 'Claude' }
@@ -508,6 +536,7 @@ $state = @{
     RulesHash = Get-FileHashValue $rules
     GuardrailsHash = Get-FileHashValue $guardrails
     TargetHash = Get-FileHashValue $target
+    SourceMapHash = Get-BytesHash ([Text.Encoding]::UTF8.GetBytes($sourceMap))
     InitialStagingHash = Get-TreeHashValue $staging
     SplitterHash = Get-FileHashValue $splitter
     WatcherHash = Get-FileHashValue $watcher
@@ -530,7 +559,7 @@ $status = 'FAILED'
 $failure = $null
 
 try {
-    $blindPrompt = New-Prompt 'BLIND REVIEWER' $guide $rules $guardrails $target $staging
+    $blindPrompt = New-Prompt 'BLIND REVIEWER' $guide $rules $guardrails $target $staging $sourceMap
     $blindA = New-RoleDirectory $privateRoot 'blind-a'
     $blindB = New-RoleDirectory $privateRoot 'blind-b'
     $providerA = if ($AllCodex) { 'codex' } else { 'claude' }
@@ -557,7 +586,7 @@ try {
 
     Write-Host 'Starting Codex comparator...'
     $comparisonMaterial = "===== GENERATED REVIEW A =====`n$reviewA===== GENERATED REVIEW B =====`n$reviewB"
-    $comparisonPrompt = New-Prompt 'COMPARATOR' $guide $rules $guardrails $target $staging $comparisonMaterial
+    $comparisonPrompt = New-Prompt 'COMPARATOR' $guide $rules $guardrails $target $staging -Material $comparisonMaterial
     $comparisonDir = New-RoleDirectory $privateRoot 'comparator'
     $comparison = Invoke-OneRole 'codex' 'comparator' $comparisonDir $comparisonPrompt $claudeCli $codexCli $inputDirectories
     Assert-InputsUnchanged $state
@@ -573,8 +602,8 @@ try {
         $proofBReport = $proofAReport
     } else {
         Write-Host 'Starting proof reviewers concurrently...'
-        $proofPromptA = New-Prompt 'PROOF REVIEWER A' $guide $rules $guardrails $target $staging "===== OWN GENERATED REVIEW (SIDE A) =====`n$reviewA===== PROOF REQUESTS =====`n$proofRequests"
-        $proofPromptB = New-Prompt 'PROOF REVIEWER B' $guide $rules $guardrails $target $staging "===== OWN GENERATED REVIEW (SIDE B) =====`n$reviewB===== PROOF REQUESTS =====`n$proofRequests"
+        $proofPromptA = New-Prompt 'PROOF REVIEWER A' $guide $rules $guardrails $target $staging -Material "===== OWN GENERATED REVIEW (SIDE A) =====`n$reviewA===== PROOF REQUESTS =====`n$proofRequests"
+        $proofPromptB = New-Prompt 'PROOF REVIEWER B' $guide $rules $guardrails $target $staging -Material "===== OWN GENERATED REVIEW (SIDE B) =====`n$reviewB===== PROOF REQUESTS =====`n$proofRequests"
         $proofDirA = New-RoleDirectory $privateRoot 'proof-a'
         $proofDirB = New-RoleDirectory $privateRoot 'proof-b'
         $proofRoleA = Start-RoleProcess $providerA 'proof-A' $proofDirA $proofPromptA $claudeCli $codexCli $inputDirectories $activeProcesses
@@ -590,7 +619,7 @@ try {
 
     Write-Host 'Starting Codex final validator...'
     $validationMaterial = "===== GENERATED REVIEW A =====`n$reviewA===== GENERATED REVIEW B =====`n$reviewB===== COMPARISON =====`n$($comparison.Report)===== PROOF A =====`n$proofAReport===== PROOF B =====`n$proofBReport"
-    $validationPrompt = New-Prompt 'FINAL VALIDATOR' $guide $rules $guardrails $target $staging $validationMaterial
+    $validationPrompt = New-Prompt 'FINAL VALIDATOR' $guide $rules $guardrails $target $staging $sourceMap $validationMaterial
     $validationDir = New-RoleDirectory $privateRoot 'validator'
     $validation = Invoke-OneRole 'codex' 'validator' $validationDir $validationPrompt $claudeCli $codexCli $inputDirectories
     Assert-InputsUnchanged $state
@@ -613,7 +642,7 @@ try {
 
         Write-Host 'Starting fresh Codex staging verifier...'
         $verifierMaterial = "FINAL GENERATED REVIEW PATH: $finalReviewPath`nSTAGING CONTRACT TREE PATH: $staging"
-        $verifierPrompt = New-Prompt 'STAGING VERIFIER' $guide $rules $guardrails $target $staging $verifierMaterial
+        $verifierPrompt = New-Prompt 'STAGING VERIFIER' $guide $rules $guardrails $target $staging -Material $verifierMaterial
         $verifierDir = New-RoleDirectory $privateRoot 'verifier'
         $verifier = Invoke-OneRole 'codex' 'verifier' $verifierDir $verifierPrompt $claudeCli $codexCli ($inputDirectories + $runDirectory | Sort-Object -Unique)
         if ($verifier.Status -ne 'VERIFIED') { throw "Staging verifier returned unexpected status: $($verifier.Status)" }

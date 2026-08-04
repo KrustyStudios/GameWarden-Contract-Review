@@ -61,7 +61,7 @@ function Get-Approval([string]$RunId, [string]$RunsRoot, [string]$StagePath = $s
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 try {
     New-Item -ItemType Directory -Path (Split-Path $guidePath), (Split-Path $targetPath), $stagingRoot | Out-Null
-    [IO.File]::WriteAllText($guidePath, "# Guide`nUse private placement coordinates and generated reviews.`n", $utf8)
+    [IO.File]::WriteAllText($guidePath, "# Guide`nUse private source block IDs and generated reviews.`n", $utf8)
     [IO.File]::WriteAllText($rulesPath, "# Rules`nKeep the original read-only.`n", $utf8)
     [IO.File]::WriteAllText($guardrailsPath, "# Guardrails`nCopy rules mechanically.`n", $utf8)
     [IO.File]::WriteAllText($targetPath, "# Example`n[EXAMPLE-RULE]`nalpha`nbeta`n", $utf8)
@@ -106,7 +106,9 @@ try {
     Assert-True (Test-Path $stagedContract -PathType Leaf) 'The final grouped result was not added to the staging tree.'
     Assert-True ((Get-Content $stagedContract -Raw) -match '\[example\]') 'The script did not apply the final tag.'
     Assert-True ((Get-FileHash $targetPath).Hash -eq $sourceHash) 'The original contract changed.'
-    Assert-True ((Get-Content (Join-Path $run 'receipt.md') -Raw) -match 'contracts/lifecycle/EXAMPLE_CONTRACT\.md.*[a-f0-9]{64}') 'Receipt omitted the staged contract hash.'
+    $receipt = Get-Content (Join-Path $run 'receipt.md') -Raw
+    Assert-True ($receipt -match 'Source block map: [a-f0-9]{64}') 'Receipt omitted the approved source-map hash.'
+    Assert-True ($receipt -match 'contracts/lifecycle/EXAMPLE_CONTRACT\.md.*[a-f0-9]{64}') 'Receipt omitted the staged contract hash.'
     foreach ($name in @('review-a.md', 'review-b.md', 'final-review.md')) {
         $visible = Get-Content (Join-Path $run $name) -Raw
         Assert-True ($visible -match '## contracts/lifecycle/EXAMPLE_CONTRACT\.md') "$name is not grouped by destination."
@@ -124,6 +126,11 @@ try {
     foreach ($inputPath in @($guidePath, $rulesPath, $guardrailsPath, $targetPath, $stagingRoot)) {
         Assert-True ($blindPrompt.Contains($inputPath, [StringComparison]::Ordinal)) "Blind prompt omitted the exact input path: $inputPath"
     }
+    $sourceMapMatch = [regex]::Match($blindPrompt, '(?ms)^BEGIN SOURCE BLOCK MAP\r?\n(.*?)^END SOURCE BLOCK MAP$')
+    Assert-True $sourceMapMatch.Success 'Blind prompt omitted the script-generated source block map.'
+    $sourceBlockIds = [regex]::Matches($sourceMapMatch.Groups[1].Value, '(?m)^(B-[a-f0-9]{16}(?:-[2-9][0-9]*)?)\t')
+    Assert-True ($sourceBlockIds.Count -eq 4) 'Blind prompt source map did not identify every source block.'
+    Assert-True ($sourceMapMatch.Groups[1].Value -notmatch '(?m)^\d+-\d+\t') 'Blind prompt still asks an AI to calculate source line ranges.'
     Assert-True ($blindPrompt -notmatch [regex]::Escape("# Example`n[EXAMPLE-RULE]")) 'Source contents were inlined instead of read from the shared path.'
     Assert-True ((Get-Content (Join-Path $logRoot 'blind-A.input-paths.txt') -Raw) -ceq (Get-Content (Join-Path $logRoot 'blind-B.input-paths.txt') -Raw)) 'Blind reviewers did not read the same shared paths.'
     Assert-True ((Get-Content (Join-Path $logRoot 'blind-A.cwd.txt') -Raw) -cne (Get-Content (Join-Path $logRoot 'blind-B.cwd.txt') -Raw)) 'Blind reviewers shared a working directory.'
@@ -131,7 +138,9 @@ try {
     Assert-True (Test-Path (Join-Path $logRoot 'blind-A.concurrent')) 'Blind reviewer A did not run concurrently.'
     Assert-True (Test-Path (Join-Path $logRoot 'blind-B.concurrent')) 'Blind reviewer B did not run concurrently.'
     $comparatorPrompt = Get-Content (Join-Path $logRoot 'comparator.prompt.md') -Raw
-    Assert-True ($comparatorPrompt -notmatch 'BEGIN PLACEMENT MANIFEST|\b1-\d+\t') 'Comparator received a private manifest.'
+    Assert-True ($comparatorPrompt -notmatch 'BEGIN PLACEMENT MANIFEST|BEGIN SOURCE BLOCK MAP|\b1-\d+\t') 'Comparator received private placement coordinates.'
+    $validatorPrompt = Get-Content (Join-Path $logRoot 'validator.prompt.md') -Raw
+    Assert-True ($validatorPrompt.Contains($sourceMapMatch.Value, [StringComparison]::Ordinal)) 'Final validator did not receive the same source block map.'
     $verifierPrompt = Get-Content (Join-Path $logRoot 'verifier.prompt.md') -Raw
     Assert-True ($verifierPrompt.Contains((Join-Path $run 'final-review.md'), [StringComparison]::Ordinal)) 'Verifier did not receive the final generated review path.'
     Assert-True ($verifierPrompt.Contains($stagingRoot, [StringComparison]::Ordinal)) 'Verifier did not receive the staging tree path.'

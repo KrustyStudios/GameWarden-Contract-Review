@@ -10,8 +10,9 @@ A small contract-placement loop:
 - the same script creates one final grouped review and adds its rules to the separate staged-contract tree;
 - one fresh Codex verifies the staged result against the original and final review.
 
-The original contracts are read-only. Private line ranges exist only long enough for the
-copy script to select exact source bytes. They never appear in retained reviews or staged
+The original contracts are read-only. The copy script gives each source block a stable ID.
+Both blind reviewers receive the same block map and copy those IDs into their private
+manifests; no AI counts source lines. Block IDs never appear in retained reviews or staged
 contracts. There is no separate per-destination AI round.
 
 ## Requirements
@@ -49,9 +50,9 @@ After the human supplies that exact phrase, run the same command with:
 ```
 
 The hash binds the exact paths and bytes of the guide, rules, guardrails, original source,
-watcher, and copy script; the complete initial staged-tree snapshot; and the routing mode,
-models, CLI commands, and timeout. Any change requires a new phrase. A run ID cannot be
-reused.
+watcher, and copy script; the script-generated source block map; the complete initial
+staged-tree snapshot; and the routing mode, models, CLI commands, and timeout. Any change
+requires a new phrase. A run ID cannot be reused.
 
 Each successful run retains:
 
